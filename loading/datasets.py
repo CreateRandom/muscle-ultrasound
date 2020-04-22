@@ -1,5 +1,6 @@
 from collections import Counter
 from copy import deepcopy
+from functools import partial
 
 from torch import is_tensor
 import os
@@ -9,11 +10,12 @@ from sklearn.preprocessing import LabelEncoder
 import PIL.Image
 from random import randint
 
+from loading.img_utils import load_dicom, load_img
 from utils.utils import repeat_to_length
 import torch
 
-class MyositisDataset(Dataset):
-
+class SingleImageDataset(Dataset):
+    # for the use case where we want to classify single images as to the patient's diagnosis
     def __init__(self, csv_file, root_dir, attribute='Diagnosis', transform=None,
                  use_one_channel=False):
         """
@@ -54,11 +56,11 @@ class MyositisDataset(Dataset):
             image = self.transform(image)
         return image, attribute_label[0]
 
-class PatientDataset(Dataset):
-    def __init__(self, patient_muscle_csv_chart, root_dir, is_val, muscle_channels=None, attribute='Diagnosis', transform=None):
-        if muscle_channels is None:
-            muscle_channels = ['D', 'B', 'FCR', 'R', 'G']
-        self.muscle_channels = muscle_channels
+class PatientChannelDataset(Dataset):
+    def __init__(self, patient_muscle_csv_chart, root_dir, is_val, muscles_to_use=None, attribute='Diagnosis', transform=None):
+        if muscles_to_use is None:
+            muscles_to_use = ['D', 'B', 'FCR', 'R', 'G']
+        self.muscle_channels = muscles_to_use
         meta_frame = pd.read_csv(patient_muscle_csv_chart)
         self.patients = parse_frame_into_patients(meta_frame)
         # merge left and right images of muscle
@@ -114,6 +116,77 @@ class PatientDataset(Dataset):
         return image, attribute_label[0]
 
 
+loader_funcs = {'.png': load_img, '.jpg': load_img, '.dcm': load_dicom}
+
+class PatientBagDataset(Dataset):
+    def __init__(self, patient_list, root_dir,
+                 is_val, muscles_to_use=None,
+                 attribute='Diagnosis', transform=None, use_one_channel=True):
+        self.muscles_to_use = muscles_to_use
+        self.patients = patient_list
+        print(f'Loaded {len(self.patients)} patients.')
+        # make pseudopatients for training purposes
+        if not is_val:
+            pp_list = []
+            for patient in self.patients:
+                pps = patient.make_pseudopatients(muscles=self.muscles_to_use, method='each_once')
+                pp_list.extend(pps)
+            self.patients = pp_list
+
+        self.root_dir = root_dir
+        self.attribute = attribute
+        self.encoder = LabelEncoder()
+        att_list = [x.attributes[attribute] for x in self.patients]
+        self.encoder.fit(att_list)
+        self.transform = transform
+        self.use_one_channel = use_one_channel
+
+    def __getitem__(self, idx):
+        if is_tensor(idx):
+            idx = idx.tolist()
+        sample = self.patients[idx]
+        sample_channels = sample.images_by_channel
+        imgs = []
+        if self.muscles_to_use is not None:
+            gen = self.muscles_to_use
+        else:
+            gen = list(sample_channels.keys())
+
+        for muscle in gen:
+            img_list = sample_channels[muscle]
+            # for now, always only take the first image, see whether we want to include
+            # multiple images of the same muscle within the same bag
+            img = img_list[0]
+            name = str(img)
+
+            # TODO fixme img_name = name + '.jpg'
+            img_name = os.path.join(self.root_dir, name)
+
+            _, extension = os.path.splitext(img_name)
+            loader_func = partial(loader_funcs[extension], use_one_channel=self.use_one_channel)
+            image = loader_func(img_name)
+            imgs.append(image)
+
+            # one or three channels
+            # mode = 'L' if self.use_one_channel else 'RGB'
+            # # load as PIL image
+            # with open(img_name, 'rb') as f:
+            #     image = PIL.Image.open(f)
+            #     image = image.convert(mode)
+            #     imgs.append(image)
+
+        attribute_label = sample.attributes[self.attribute]
+        attribute_label = self.encoder.transform([attribute_label])
+        if self.transform:
+            imgs = [self.transform(image) for image in imgs]
+
+        # stack up the tensors at the end
+        image = torch.stack(imgs)
+        return image, attribute_label[0]
+
+    def __len__(self):
+        return len(self.patients)
+
 
 class Patient(object):
 
@@ -125,7 +198,10 @@ class Patient(object):
         # a mapping from channel_ids / muscles to image paths
         self.images_by_channel = images_by_channel
 
-    def make_pseudopatients(self, muscles, method='each_once', n_limit=100):
+    def make_pseudopatients(self, muscles=None, method='each_once', n_limit=100):
+        if not muscles:
+            muscles = list(self.images_by_channel.keys())
+
         img_lists = [self.images_by_channel[muscle] for muscle in muscles]
         max_len = max([len(img_list) for img_list in img_lists])
         # make sure the lists all have the same length
@@ -161,15 +237,17 @@ class Patient(object):
 
         return pseudopatients
 
-def parse_frame_into_patients(frame):
-    patient_ids = frame['PatientID'].unique().tolist()
+def parse_frame_into_patients(frame, data_source = 'albayda_github',
+                              patient_id_name='PatientID', muscle_field_name='Muscle',
+                              image_field_name='Image2D'):
+    patient_ids = frame[patient_id_name].unique().tolist()
     # attributes that are not the same for every row within a patient
-    non_uniform_atts = ['PatientID', 'Image2D', 'Muscle']
+    non_uniform_atts = [patient_id_name, image_field_name, muscle_field_name]
     all_atts = set(frame.columns.to_list())
-    uniform_attributes =  all_atts - set(non_uniform_atts)
+    uniform_attributes = all_atts - set(non_uniform_atts)
     patients = []
     for patient_id in patient_ids:
-        patient_rows = frame[frame['PatientID'] == patient_id]
+        patient_rows = frame[frame[patient_id_name] == patient_id]
         # grab the first row and read out the uniform_attributes
         first_row = patient_rows.iloc[0]
         attributes = {}
@@ -177,15 +255,15 @@ def parse_frame_into_patients(frame):
             attributes[att] = first_row[att]
 
         # grab all the muscles for which we have a record from for this patient
-        muscles = patient_rows['Muscle'].unique().tolist()
+        muscles = patient_rows[muscle_field_name].unique().tolist()
         images_by_muscle = {}
         for muscle in muscles:
-            muscle_rows = patient_rows[patient_rows['Muscle'] == muscle]
+            muscle_rows = patient_rows[patient_rows[muscle_field_name] == muscle]
             # get the ids for all images of this muscle
-            image_ids = muscle_rows['Image2D'].unique().tolist()
+            image_ids = muscle_rows[image_field_name].unique().tolist()
             images_by_muscle[muscle] = image_ids
 
-        p = Patient(p_id = patient_id, source='albayda_github', attributes=attributes, images_by_channel=images_by_muscle)
+        p = Patient(p_id = patient_id, source=data_source, attributes=attributes, images_by_channel=images_by_muscle)
         patients.append(p)
 
     return patients

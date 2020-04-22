@@ -1,3 +1,5 @@
+from functools import partial
+
 import torch
 from torch import nn, optim
 from torch.utils.data import random_split, DataLoader
@@ -6,9 +8,39 @@ from ignite.engine import Events, create_supervised_trainer, create_supervised_e
 from ignite.metrics import Accuracy, Loss, Precision, Recall
 from ignite.contrib.handlers import ProgressBar
 from ignite.handlers import ModelCheckpoint
+from torchvision.datasets import DatasetFolder
+from torchvision.transforms import transforms
 
-from loading.umc import make_umc_set
+from loading.img_utils import load_dicom
 from models.premade import make_resnet_18
+
+def make_umc_set(base_path, load_mask=False, use_one_channel=False, normalize=True):
+    """
+
+    :param base_path: A path that contains a folder for each class, which in turn contains dicom files
+    and optionally mat files with ROIs to be used as mask
+    :param load_mask: Whether mat files should be loaded and used as masks
+    :return: A torch.utils.data.Dataset
+    """
+    # for now, use a standard class with a dicom loader, might want to come up with a custom format
+    loader = partial(load_dicom, load_mask=load_mask, use_one_channel=use_one_channel)
+
+    # image size to rescale to
+    r = transforms.Resize((224, 224))
+
+    t_list = [r, transforms.ToTensor()]
+
+    # we can only normalize if we use all three channels
+    if normalize and not use_one_channel:
+        # necessary to leverage the pre-trained models properly
+        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                         std=[0.229, 0.224, 0.225])
+
+        t_list.append(normalize)
+
+    c = transforms.Compose(t_list)
+
+    return DatasetFolder(root=base_path, loader=loader, extensions=('dcm',), transform=c)
 
 torch.manual_seed(42)
 base_path = '/mnt/chansey/klaus/Gastrocnemius'

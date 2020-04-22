@@ -1,7 +1,7 @@
 import ray
 from torch.utils.data import DataLoader
 from torchvision.transforms import transforms
-from loading.myositis import MyositisDataset
+from loading.datasets import SingleImageDataset
 from models.premade import make_resnet_18
 from ray import tune
 
@@ -18,7 +18,7 @@ import numpy as np
 
 
 def make_loader(csv_path, root_folder, attribute, transform, batch_size, use_one_channel=False):
-    ds = MyositisDataset(csv_path, root_folder, attribute, transform, use_one_channel)
+    ds = SingleImageDataset(csv_path, root_folder, attribute, transform, use_one_channel)
     loader = DataLoader(ds, batch_size=batch_size, shuffle=True, num_workers=4)
     return loader
 

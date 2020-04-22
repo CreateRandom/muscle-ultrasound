@@ -1,8 +1,10 @@
 import ray
 from torch.utils.data import DataLoader
 from torchvision.transforms import transforms
-from loading.myositis import PatientDataset
-from models.multi_input import MultiInputNet
+
+from loading.mnist_bags import MnistBags
+from loading.datasets import PatientChannelDataset, PatientBagDataset
+from models.multi_input import MultiInputAlexNet, MultiInputNet, BernoulliLoss
 from models.premade import make_resnet_18, make_alexnet
 from ray import tune
 
@@ -17,10 +19,9 @@ from imgaug.augmenters import RandAugment
 from sklearn.metrics import accuracy_score, precision_score, recall_score
 import numpy as np
 
-
-def make_loader(csv_path, root_folder, attribute, transform, batch_size, is_val, muscle_channels):
-    ds = PatientDataset(patient_muscle_csv_chart=csv_path, root_dir=root_folder,
-                        attribute=attribute, transform=transform, is_val=is_val, muscle_channels=muscle_channels)
+def make_patient_channel_loader(csv_path, root_folder, attribute, transform, batch_size, is_val, muscles_to_use):
+    ds = PatientChannelDataset(patient_muscle_csv_chart=csv_path, root_dir=root_folder,
+                               attribute=attribute, transform=transform, is_val=is_val, muscles_to_use=muscles_to_use)
     loader = DataLoader(ds, batch_size=batch_size, shuffle=True, num_workers=4)
     return loader
 
@@ -56,6 +57,7 @@ img_folder = '/home/klux/Thesis_2/data/myositis/processed_imgs'
 
 
 def train_model(config):
+    # BACKEND aspects
     pretrained = config.get('pretrained', False)
     feature_extraction = config.get('feature_extraction', False)
     batch_size = config.get('batch_size', 16)
@@ -63,16 +65,17 @@ def train_model(config):
     n_epochs = config.get('n_epochs', 5)
 
     attribute = 'Diagnosis_bin'
-    muscle_channels = ['D', 'B', 'FCR', 'R', 'G']
+    muscles_to_use = ['D', 'B', 'FCR', 'R', 'G']
+
     train_transform = make_transform(use_augment=False)
-    train_loader = make_loader('/home/klux/Thesis_2/data/myositis/train.csv', img_folder,
-                               attribute=attribute, transform=train_transform, batch_size=batch_size,
-                               is_val=False, muscle_channels=muscle_channels)
+    train_loader = make_patient_channel_loader('/home/klux/Thesis_2/data/myositis/train.csv', img_folder,
+                                           attribute=attribute, transform=train_transform, batch_size=batch_size,
+                                           is_val=False, muscles_to_use=muscles_to_use)
 
     val_transform = make_transform(use_augment=False)
-    val_loader = make_loader('/home/klux/Thesis_2/data/myositis/val.csv', img_folder,
-                             attribute=attribute, transform=val_transform, batch_size=batch_size,
-                             is_val=False, muscle_channels=muscle_channels)
+    val_loader = make_patient_channel_loader('/home/klux/Thesis_2/data/myositis/val.csv', img_folder,
+                                         attribute=attribute, transform=val_transform, batch_size=batch_size,
+                                         is_val=True, muscles_to_use=muscles_to_use)
 
     def binarize_predictions(y_pred):
         sm = nn.Softmax(dim=1)(y_pred)
@@ -83,12 +86,9 @@ def train_model(config):
         y_pred, y = output
         return binarize_predictions(y_pred), y
 
-    in_channels = len(muscle_channels)
+    in_channels = len(muscles_to_use)
 
-  #  model = make_alexnet(num_classes=2, pretrained=pretrained, in_channels=in_channels,
-  #                         feature_extraction=feature_extraction)
-
-    model = MultiInputNet()
+    model = MultiInputAlexNet()
 
     # todo investigate / tune
     criterion = nn.CrossEntropyLoss()
@@ -133,7 +133,6 @@ def train_model(config):
         acc = accuracy_score(y_epoch, ypred_epoch)
         p = precision_score(y_epoch, ypred_epoch)
         r = recall_score(y_epoch, ypred_epoch)
-
         print(
             "Training Results - Epoch: {} Avg accuracy: {:.2f} Avg precision: {:.2f} Avg recall: {:.2f} Avg loss: {:.2f}"
             .format(trainer.state.epoch, acc, p, r, loss))

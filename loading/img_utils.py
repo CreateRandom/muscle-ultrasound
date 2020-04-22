@@ -1,8 +1,5 @@
-from functools import partial
-
 import PIL
-from torchvision.datasets import DatasetFolder
-import torchvision.transforms as transforms
+import PIL.Image
 
 import pydicom
 
@@ -43,7 +40,7 @@ def create_mask(mat_file_path, im_arr):
     return mask
 
 
-def load_and_crop_dicom(dicom_path, load_mask=False, use_one_channel=False):
+def load_dicom(dicom_path, load_mask=False, use_one_channel=False):
     """
     A loader function for reading ultrasound dicoms and optionally masks stored on the same path
     :param dicom_path: A dicom_path
@@ -52,48 +49,35 @@ def load_and_crop_dicom(dicom_path, load_mask=False, use_one_channel=False):
     """
     f = pydicom.dcmread(dicom_path)
     im_arr = f.pixel_array
-    # we only care for one channel, as the others are redundant
-    if use_one_channel:
-        im_arr = im_arr[:, :, 1]
+    # stack up the one channel to normal "RGB"
+    if not use_one_channel:
+        im_arr = np.stack((im_arr,im_arr,im_arr),axis=2)
     # load the mask from the mat file of the same name
     if load_mask:
-        mat_path = dicom_path.strip('.dcm') + '.mat'
+        mat_path = dicom_path + '.mat'
         try:
             mask = create_mask(mat_path, im_arr)
             im_arr[~mask] = 0
         except:
             print('WARNING: Could not retrieve mask mat file, not applying mask.')
 
-    # TODO better cropping
-    im = im_arr[78:552, 241:743]
-    im = PIL.Image.fromarray(im)
+    im = PIL.Image.fromarray(im_arr)
     return im
 
 
-def make_umc_set(base_path, load_mask=False, use_one_channel=False, normalize=True):
-    """
+def load_img(img_name, use_one_channel=False):
+    # one or three channels
+    mode = 'L' if use_one_channel else 'RGB'
+    # load as PIL image
+    with open(img_name, 'rb') as f:
+        image = PIL.Image.open(f)
+        image = image.convert(mode)
+    return image
 
-    :param base_path: A path that contains a folder for each class, which in turn contains dicom files
-    and optionally mat files with ROIs to be used as mask
-    :param load_mask: Whether mat files should be loaded and used as masks
-    :return: A torch.utils.data.Dataset
-    """
-    # for now, use a standard class with a dicom loader, might want to come up with a custom format
-    loader = partial(load_and_crop_dicom,load_mask=load_mask, use_one_channel=use_one_channel)
 
-    # image size to rescale to
-    r = transforms.Resize((224, 224))
+class AugmentWrapper(object):
+    def __init__(self, augment):
+        self.augment = augment
 
-    t_list = [r, transforms.ToTensor()]
-
-    # we can only normalize if we use all three channels
-    if normalize and not use_one_channel:
-        # necessary to leverage the pre-trained models properly
-        normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                         std=[0.229, 0.224, 0.225])
-
-        t_list.append(normalize)
-
-    c = transforms.Compose(t_list)
-
-    return DatasetFolder(root=base_path, loader=loader, extensions=('dcm',), transform=c)
+    def __call__(self, img):
+        return self.augment.augment_image(np.array(img))
