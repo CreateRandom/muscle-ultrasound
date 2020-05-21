@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 
+import torchvision.models as models
 
 def make_resnet_18(num_classes, pretrained=True, in_channels=3, feature_extraction=False):
 
@@ -11,7 +12,8 @@ def make_resnet_18(num_classes, pretrained=True, in_channels=3, feature_extracti
     if not has_three_channels and feature_extraction:
         raise ValueError('Can only perform feature extraction for image with three channels.')
 
-    model = torch.hub.load('pytorch/vision:v0.5.0', 'resnet18', pretrained=pretrained)
+    # model = torch.hub.load('pytorch/vision:v0.5.0', 'resnet18', pretrained=pretrained)
+    model = models.resnet18(pretrained=pretrained)
 
     if feature_extraction:
         # freeze all the layers
@@ -37,8 +39,8 @@ def make_alexnet(num_classes, pretrained=True, in_channels=3, feature_extraction
     if not has_three_channels and feature_extraction:
         raise ValueError('Can only perform feature extraction for image with three channels.')
 
-    model = torch.hub.load('pytorch/vision:v0.5.0', 'alexnet', pretrained=pretrained)
-
+   # model = torch.hub.load('pytorch/vision:v0.5.0', 'alexnet', pretrained=pretrained)
+    model = models.alexnet(pretrained=pretrained)
     if feature_extraction:
         # freeze all the layers
         for param in model.parameters():

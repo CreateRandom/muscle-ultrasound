@@ -5,7 +5,7 @@ import torch
 from ignite.metrics import Metric
 
 
-class ValueCount(Metric):
+class PositiveShare(Metric):
 
     def __init__(self, output_transform: Callable = lambda x: x, device: Optional[Union[str, torch.device]] = None):
         super().__init__(output_transform, device)
@@ -16,10 +16,9 @@ class ValueCount(Metric):
 
     def update(self, output) -> None:
         y_pred, y = output
-        self._check_shape((y_pred, y))
-        self._check_type((y_pred, y))
-        self.counter.update(list(y_pred))
+        self.counter.update(list(y_pred.flatten().cpu().numpy()))
 
     def compute(self) -> Any:
-        counts = self.counter.most_common()
-        return counts
+        total_count = sum(self.counter.values())
+        positive_count = self.counter[1]
+        return float(positive_count / total_count)

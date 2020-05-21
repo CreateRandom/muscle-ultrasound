@@ -16,21 +16,22 @@ import torch
 
 class SingleImageDataset(Dataset):
     # for the use case where we want to classify single images as to the patient's diagnosis
-    def __init__(self, csv_file, root_dir, attribute='Diagnosis', transform=None,
-                 use_one_channel=False):
+    def __init__(self, meta_frame, root_dir, attribute='Diagnosis', transform=None,
+                 use_one_channel=False, image_column='Image2D'):
         """
         Args:
-            csv_file (string): Path to the csv file with meta info.
+            meta_frame (DataFrame): DataFrame containing image information
             root_dir (string): Directory with all the images.
             attribute (string): The attribute to output. Default: Diagnosis.
         """
-        self.meta_frame = pd.read_csv(csv_file)
+        self.meta_frame = meta_frame
         self.root_dir = root_dir
         self.attribute = attribute
         self.encoder = LabelEncoder()
         self.encoder.fit(self.meta_frame[attribute])
         self.transform = transform
         self.use_one_channel = use_one_channel
+        self.image_column = image_column
 
     def __len__(self):
         return len(self.meta_frame)
@@ -39,15 +40,12 @@ class SingleImageDataset(Dataset):
         if is_tensor(idx):
             idx = idx.tolist()
         sample = self.meta_frame.iloc[idx]
-        img_name = str(str(sample['Image2D']) + '.jpg')
-        img_name = os.path.join(self.root_dir, img_name)
 
-        # load as PIL image
-        with open(img_name, 'rb') as f:
-            image = PIL.Image.open(f)
-            # Luminance if only one channel, else RGB
-            type = 'L' if self.use_one_channel else 'RGB'
-            image = image.convert(type)
+        img_name = os.path.join(self.root_dir, str(sample[self.image_column]))
+
+        _, extension = os.path.splitext(img_name)
+        loader_func = partial(loader_funcs[extension], use_one_channel=self.use_one_channel)
+        image = loader_func(img_name)
 
         attribute_label = sample[self.attribute]
         attribute_label = self.encoder.transform([attribute_label])
@@ -120,13 +118,13 @@ loader_funcs = {'.png': load_img, '.jpg': load_img, '.dcm': load_dicom}
 
 class PatientBagDataset(Dataset):
     def __init__(self, patient_list, root_dir,
-                 is_val, muscles_to_use=None,
+                 use_pseudopatients, muscles_to_use=None,
                  attribute='Diagnosis', transform=None, use_one_channel=True):
         self.muscles_to_use = muscles_to_use
         self.patients = patient_list
         print(f'Loaded {len(self.patients)} patients.')
         # make pseudopatients for training purposes
-        if not is_val:
+        if use_pseudopatients:
             pp_list = []
             for patient in self.patients:
                 pps = patient.make_pseudopatients(muscles=self.muscles_to_use, method='each_once')
@@ -159,7 +157,6 @@ class PatientBagDataset(Dataset):
             img = img_list[0]
             name = str(img)
 
-            # TODO fixme img_name = name + '.jpg'
             img_name = os.path.join(self.root_dir, name)
 
             _, extension = os.path.splitext(img_name)

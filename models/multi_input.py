@@ -82,7 +82,7 @@ def make_default_backend(use_embedding, backend_kwargs):
     if use_embedding:
         out_dim = 500
 
-    return DefaultBackend(out_dim)
+    return DefaultBackend(out_dim), out_dim
 
 def make_resnet_backend(use_embedding, backend_kwargs):
     out_dim = 1
@@ -124,13 +124,38 @@ class MultiInputNet(nn.Module):
         return f'MultiInputNet with {self.backend_type} ' \
                f'backend, {self.mil_pooling_type} mil and {self.classifier_type} classifier'
 
-    def forward(self, x):
+    # TODO see how to expand the batch size
+    def forward_single(self, x):
         # input here has batch (always 1) * bag * channels * px * px
         x = x.squeeze(0)
         x = self.backend(x)
         x = self.mil_pooling(x)
         x = self.classifier(x)
+        # 1 * 1
         return x
+
+    def forward(self, x):
+        # img_rep: n_total_images * channels * height * width
+        # n_images_per_bag: how to allocate images to bags
+        img_rep, n_images_per_bag = x
+        n_images_per_bag = tuple(n_images_per_bag.cpu().numpy())
+
+        # patients (batch size) * n_images_per_patient * channels * height * width
+#        n_patients = x.shape[-5]
+     #   n_images_per_patient = x.shape[-4]
+        # all_images_flat = x.reshape(-1, x.shape[-3], x.shape[-2], x.shape[-1])
+        all_mats_flat = self.backend(img_rep)
+
+        pwise_images = torch.split(all_mats_flat, n_images_per_bag)
+
+        # reshape back to original format
+        # mil_inputs = all_mats_flat.reshape(n_patients, n_images_per_patient, self.backend_out_dim)
+        pooled = []
+        for elem in pwise_images:
+            pooled.append(self.classifier(self.mil_pooling(elem)).squeeze())
+        tester = torch.stack(pooled)
+
+        return tester
 
     @staticmethod
     def make_backend(backend_name, mode, backend_kwargs):
@@ -175,8 +200,11 @@ def BernoulliLoss(output, target):
     # apply the sigmoid here
     # Y_sig = nn.Sigmoid()(output)
     # Y_pos = Y_sig[:,1]
+    # added
+  #  output = output.squeeze()
+
     Y_prob = torch.clamp(output, min=1e-5, max=1. - 1e-5)
     Y = target
     neg_log_likelihood = -1. * (Y * torch.log(Y_prob) + (1. - Y) * torch.log(1. - Y_prob))  # negative log bernoulli
-
-    return neg_log_likelihood.squeeze()
+    return torch.sum(neg_log_likelihood)
+   # return neg_log_likelihood.squeeze()
