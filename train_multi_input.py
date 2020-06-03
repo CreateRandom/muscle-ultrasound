@@ -1,7 +1,6 @@
 import random
 
 from ignite.contrib.handlers.tensorboard_logger import WeightsScalarHandler
-from sklearn.model_selection import train_test_split
 from torch.nn import BCELoss, BCEWithLogitsLoss, MSELoss
 from torch.utils.data import DataLoader
 
@@ -16,10 +15,9 @@ import torch
 from torch import nn, optim
 
 from ignite.engine import Events, create_supervised_trainer, create_supervised_evaluator, Engine
-from ignite.metrics import Accuracy, Loss, Precision, Recall, MeanSquaredError, MeanAbsoluteError
+from ignite.metrics import Accuracy, Loss, Precision, Recall, MeanAbsoluteError
 from ignite.contrib.handlers import ProgressBar, TensorboardLogger
 from ignite.handlers import ModelCheckpoint, global_step_from_engine
-from sklearn.metrics import accuracy_score, precision_score, recall_score
 import numpy as np
 
 # import logging
@@ -38,16 +36,14 @@ def binarize_sigmoid(y_pred):
     y_sig = nn.Sigmoid()(y_pred)
     return torch.ge(y_sig, 0.5).int()
 
-
 # if we have an FC as the last layer
 def binarize_softmax(y_pred):
     sm = nn.Softmax(dim=1)(y_pred)
     _, i = torch.max(sm, dim=1)
     return i
 
-
 def binarize_output(output):
-    y_pred, y = output
+    y_pred, y = output['y_pred'], output['y']
     y_pred = binarize_sigmoid(y_pred)
     return y_pred, y
 
@@ -103,11 +99,18 @@ def train_model(config):
 
     data_source = config.get('data_source', 'umc')
     use_pseudopatients = config.get('use_pseudopatients', False)
+
+    # CONFIG ASPECTS
     use_cuda = config.get('use_cuda', True) & torch.cuda.is_available()
 
+    # whether a separate pass over the entire dataset should be done to log training set performance
+    # as this incurs overhead, it can be turned off, then the results computed after each batch during the epoch
+    # will be used instead
+    log_training_metrics_clean = False
+
     npt_logger = NeptuneLogger(api_token=NEPTUNE_API_TOKEN,
-                               project_name='createrandom/muscle-ultrasound',
-                               name='multi_input', params=config, offline_mode=True)
+                               project_name='createrandom/sandbox',
+                               name='multi_input', params=config, offline_mode=False)
 
     # TODO refactor data loading
     current_host = socket.gethostname()
@@ -119,16 +122,17 @@ def train_model(config):
 
     print(f'Using mount_path: {mnt_path}')
 
-    attribute = 'Age'
+    attribute = 'Sex'
     # todo infer or hard code the type of problem based on the attribute
-    is_classification = False
+    is_classification = True
 
     # for each device, we have a test, val and a test set
 
     # the sets we need: supervised train, unsupervised train (potentially)
     # any number of validation sets
 
-    set_spec = {'source_train': ['ESAOTE_6100/train'], 'target_train': ['Philips_iU22/train'],
+    # 'target_train': ['Philips_iU22/train']
+    set_spec = {'source_train': ['ESAOTE_6100/train'],
                 'val': [('ESAOTE_6100/val'), ('Philips_iU22/val')]}
 
     set_loaders = {}
@@ -208,19 +212,20 @@ def train_model(config):
     # needs to be manually enforced to work on the cluster
     model.to(device)
 
-    # called on every iteration
-    def evaluate_training_items(x, y, y_pred, loss):
-        preds = binarize_sigmoid(y_pred)
-        ypred_epoch.extend(preds.cpu().numpy().tolist())
-        y_epoch.extend(y.cpu().numpy().tolist())
-        losses.append(loss.item())
-        return loss.item()
+    # this custom transform allows attaching metrics directly to the trainer
+    # as y and y_pred can be read out from the output dict
+    def custom_output_transform(x, y, y_pred, loss):
+        return {
+            "y": y,
+            "y_pred": y_pred,
+            "loss": loss.item()
+        }
 
     trainer = create_supervised_trainer(model, optimizer, criterion,
-                                        device=device)#, output_transform=evaluate_training_items)
+                                        device=device, output_transform=custom_output_transform)
 
     # always log the loss
-    metrics = {'loss': Loss(criterion)}
+    metrics = {'loss': Loss(criterion, output_transform=lambda x: (x['y_pred'], x['y']))}
 
     if is_classification:
         # TODO adapt for non-binary case
@@ -232,32 +237,57 @@ def train_model(config):
 
 
     else:
-        def extract_pred(output):
-            y_pred, y = output
-            return y_pred
 
-        metrics_to_add = {'mse': MeanSquaredError(), 'mae': MeanAbsoluteError(),
-                          'mean': Average(output_transform=extract_pred),
-                          'var': Variance(output_transform=extract_pred)}
+        metrics_to_add = {'mae': MeanAbsoluteError(),
+                          'mean': Average(output_transform=lambda output: output['y_pred']),
+                          'var': Variance(output_transform=lambda output: output['y_pred'])}
 
     metrics = {**metrics, **metrics_to_add}
 
-    train_evaluator = create_supervised_evaluator(model, metrics=metrics, device=device)
-    # enable training logging
-    npt_logger.attach(train_evaluator,
+    # attach metrics to the trainer
+    for name, metric in metrics.items():
+        metric.attach(trainer, name)
+
+    # there are two ways to log metrics during training
+    # one can log them during the epoch, after each batch
+    # and then just compute the average across batches
+    # this is what e.g. standard Keras does
+    # or one can compute a clean pass after all the batches have been processed, iterating over them again
+    # the latter is the standard practice in ignite examples, but incurs some considerable overhead
+
+    # attach directly to trainer (log results after each batch)
+    npt_logger.attach(trainer,
                       log_handler=OutputHandler(tag="training",
-                                                metric_names=list(metrics.keys()),
-                                                global_step_transform=global_step_from_engine(trainer)),
+                                                metric_names='all'),
                       event_name=Events.EPOCH_COMPLETED)
+
+    def custom_output_transform_eval(x, y, y_pred):
+        return {
+            "y": y,
+            "y_pred": y_pred,
+        }
+
+    # only if desired incur the extra overhead
+    if log_training_metrics_clean:
+        # make a separate evaluator and attach to it instead (do a clean pass)
+        train_evaluator = create_supervised_evaluator(model, metrics=metrics, device=device, output_transform=custom_output_transform_eval)
+        # enable training logging
+        npt_logger.attach(train_evaluator,
+                          log_handler=OutputHandler(tag="training_clean",
+                                                    metric_names='all',
+                                                    global_step_transform=global_step_from_engine(trainer)),
+                          event_name=Events.EPOCH_COMPLETED)
 
 
     # for each validation set, create an evaluator and attach it to the logger
     val_names = set_spec['val']
     val_loaders = set_loaders['val']
     val_evaluators = []
+
     for name, loader in zip(val_names, val_loaders):
 
-        val_evaluator = create_supervised_evaluator(model, metrics=metrics, device=device)
+        val_evaluator = create_supervised_evaluator(model, metrics=metrics, device=device,
+                                                    output_transform=custom_output_transform_eval)
         # enable validation logging
         npt_logger.attach(val_evaluator,
                           log_handler=OutputHandler(tag=name,
@@ -279,51 +309,18 @@ def train_model(config):
     # trainer.add_event_handler(Events.EPOCH_COMPLETED(every=1), checkpointer, {'mymodel': model})
 
     @trainer.on(Events.EPOCH_COMPLETED)
-    def log_training_results(trainer):
-        # this is a waste of resources
-        train_evaluator.run(train_loader)
-        metrics = train_evaluator.state.metrics
-        print(trainer.state.epoch)
-        print(metrics)
-        # print(
-        #     "Training Results - Epoch: {}  Avg accuracy: {:.2f} "
-        #     "Avg precision: {:.2f} Avg recall: {:.2f} Avg loss: {:.2f} Share positive: {:.2f}"
-        #         .format(trainer.state.epoch, metrics['accuracy'], metrics['p'], metrics['r'],
-        #                 metrics['loss'], metrics['pos_share']))
+    def log_results(trainer):
+        print(trainer.state.epoch, trainer.state.metrics)
+        if log_training_metrics_clean:
+            train_evaluator.run(train_loader)
+            print(train_evaluator.state.epoch, train_evaluator.state.metrics)
 
-        # a more convoluted but faster way (saves the double execution cost)
-
-        # global losses, y_epoch, ypred_epoch
-        # loss = np.mean(losses)
-        # acc = accuracy_score(y_epoch, ypred_epoch)
-        # p = precision_score(y_epoch, ypred_epoch)
-        # r = recall_score(y_epoch, ypred_epoch)
-        # print(
-        #     "Training Results - Epoch: {} Avg accuracy: {:.2f} Avg precision: {:.2f} Avg recall: {:.2f} Avg loss: {:.2f}"
-        #         .format(trainer.state.epoch, acc, p, r, loss))
-        #
-        # # overwrite to enable logging
-        # train_evaluator.state.metrics = {'accuracy': acc, 'p': p, 'r': r, 'loss': loss}
-        #
-        # # reset the storage
-        # y_epoch = []
-        # ypred_epoch = []
-        # losses = []
-
-    @trainer.on(Events.EPOCH_COMPLETED)
-    def log_validation_results(trainer):
-        # run on each set
+        # run on validation each set
         for val_evaluator, val_loader in zip(val_evaluators, val_loaders):
             val_evaluator.run(val_loader)
-            metrics = val_evaluator.state.metrics
-            print(trainer.state.epoch)
-            print(metrics)
-        # print(
-        #     "Validation Results - Epoch: {}  Avg accuracy: {:.2f} "
-        #     "Avg precision: {:.2f} Avg recall: {:.2f} Avg loss: {:.2f} Share positive: {:.2f}"
-        #     .format(trainer.state.epoch, metrics['accuracy'], metrics['p'], metrics['r'], metrics['loss'], metrics['pos_share']))
+            print(val_evaluator.state.epoch, val_evaluator.state.metrics)
 
-    #  tune.track.log(iter=evaluator.state.epoch, mean_accuracy=metrics['accuracy'])
+         #  tune.track.log(iter=evaluator.state.epoch, mean_accuracy=metrics['accuracy'])
 
     train_loader = set_loaders['source_train'][0]
     trainer.run(train_loader, max_epochs=n_epochs)
