@@ -105,12 +105,13 @@ backend_funcs = {'resnet-18': make_resnet_backend, 'default': make_default_backe
 
 # for now, we will always assume binary classification, maybe later see how to expand this
 class MultiInputNet(nn.Module):
-    def __init__(self, backend='alexnet', mil_pooling='attention', classifier='fc', mode='embedding', backend_kwargs=None):
+    def __init__(self, backend='alexnet', mil_pooling='attention', classifier='fc', mode='embedding', out_dim=1,
+                 backend_kwargs=None):
         super(MultiInputNet, self).__init__()
         self.backend_type = backend
         self.mode = mode
         self.backend_kwargs = {} if not backend_kwargs else backend_kwargs
-
+        self.out_dim = out_dim
         self.mil_pooling_type = mil_pooling
         self.classifier_type = classifier
         # TODO allow for multiple backends
@@ -118,13 +119,13 @@ class MultiInputNet(nn.Module):
         # TODO allow for multiple pooling functions
         self.mil_pooling = self.make_mil_pooling(mil_pooling, self.backend_out_dim)
         # TODO allow for multiple classifiers
-        self.classifier = self.make_classifier(classifier, self.backend_out_dim)
+        self.classifier = self.make_classifier(classifier, self.backend_out_dim, self.out_dim)
 
     def __str__(self):
         return f'MultiInputNet with {self.backend_type} ' \
                f'backend, {self.mil_pooling_type} mil and {self.classifier_type} classifier'
 
-    # TODO see how to expand the batch size
+    # for the case where the batch size is one
     def forward_single(self, x):
         # input here has batch (always 1) * bag * channels * px * px
         x = x.squeeze(0)
@@ -141,8 +142,8 @@ class MultiInputNet(nn.Module):
         n_images_per_bag = tuple(n_images_per_bag.cpu().numpy())
 
         # patients (batch size) * n_images_per_patient * channels * height * width
-#        n_patients = x.shape[-5]
-     #   n_images_per_patient = x.shape[-4]
+        # n_patients = x.shape[-5]
+        # n_images_per_patient = x.shape[-4]
         # all_images_flat = x.reshape(-1, x.shape[-3], x.shape[-2], x.shape[-1])
         all_mats_flat = self.backend(img_rep)
 
@@ -188,11 +189,9 @@ class MultiInputNet(nn.Module):
             raise ValueError(f'Invalid MIL type: {type}')
 
     @staticmethod
-    def make_classifier(type, in_dim):
-        # TODO dynamically figure out the dimensions here
+    def make_classifier(type, in_dim, out_dim):
         classifier = nn.Sequential(
-            nn.Linear(in_dim, 1),
-            nn.Sigmoid()
+            nn.Linear(in_dim, out_dim),
         )
         return classifier
 

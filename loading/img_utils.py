@@ -5,7 +5,7 @@ import pydicom
 
 from scipy.io import loadmat
 import numpy as np
-
+from skimage.draw import polygon2mask
 
 def make_bbox_from_lines(lines):
     """
@@ -21,23 +21,22 @@ def make_bbox_from_lines(lines):
     return x_min, x_max, y_min, y_max
 
 
-def create_mask(mat_file_path, im_arr):
+def create_mask(mat_file_path, im_shape):
     """
     Creates a mask that represents the ROI in the ultrasound images from mat file
     that contains drawn lines.
     :param mat_file_path: The path to the mat file
-    :param im_arr: The image array
+    :param im_shape: The image size
     :return: A mask that represents the ROI, True if the pixel is inside the ROI
     """
     mat_file = loadmat(mat_file_path)
-    lines = mat_file['roi']
-    # todo think about the bounding box
-    x_min, x_max, y_min, y_max = make_bbox_from_lines(lines)
-    mask = np.zeros_like(im_arr)
-    mask[x_min:x_max, y_min:y_max] = 1
-    mask = mask.astype(bool)
-
-    return mask
+    if 'r' in mat_file:
+        lines = mat_file['r']['roi'][0][0]
+    elif 'roi' in mat_file:
+        lines = mat_file['roi']
+    else:
+        return None
+    return polygon2mask(im_shape,lines.transpose())
 
 
 def load_dicom(dicom_path, load_mask=False, use_one_channel=False):
@@ -56,7 +55,7 @@ def load_dicom(dicom_path, load_mask=False, use_one_channel=False):
     if load_mask:
         mat_path = dicom_path + '.mat'
         try:
-            mask = create_mask(mat_path, im_arr)
+            mask = create_mask(mat_path, im_arr.shape)
             im_arr[~mask] = 0
         except:
             print('WARNING: Could not retrieve mask mat file, not applying mask.')
@@ -75,9 +74,22 @@ def load_img(img_name, use_one_channel=False):
     return image
 
 
-class AugmentWrapper(object):
-    def __init__(self, augment):
-        self.augment = augment
+class FixedHeightCrop(object):
+
+    def __init__(self, remove_top, remove_bottom):
+        self.remove_top = remove_top
+        self.remove_bottom = remove_bottom
 
     def __call__(self, img):
-        return self.augment.augment_image(np.array(img))
+        """
+        Args:
+            img (PIL Image): Image to be cropped.
+
+        Returns:
+            PIL Image: Cropped image.
+        """
+
+        return img.crop((0, self.remove_top + 1, img.width, img.height - self.remove_bottom + 1))
+
+    def __repr__(self):
+        return self.__class__.__name__ + '(remove_top={0}, remove_bottom={1})'.format(self.remove_top, self.remove_bottom)
