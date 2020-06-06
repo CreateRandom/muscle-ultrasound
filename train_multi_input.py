@@ -1,12 +1,9 @@
 import random
 
-from ignite.contrib.handlers.tensorboard_logger import WeightsScalarHandler
 from torch.nn import BCELoss, BCEWithLogitsLoss, MSELoss
-from torch.utils.data import DataLoader
 
-from loading.loaders import make_myositis_loaders, make_umc_loader, compute_empirical_mean_and_std, \
-    make_basic_transform_new, preprocess_umc_patients_new
-from loading.mnist_bags import MnistBags
+from loading.loaders import make_bag_loader, umc_to_patient_list, \
+    SetSpec, get_data_for_spec, make_image_loader
 from models.multi_input import MultiInputNet, BernoulliLoss
 import os
 import socket
@@ -21,8 +18,9 @@ from ignite.handlers import ModelCheckpoint, global_step_from_engine
 import numpy as np
 
 # import logging
-from ignite.contrib.handlers.neptune_logger import NeptuneLogger, OutputHandler, GradsScalarHandler
+from ignite.contrib.handlers.neptune_logger import NeptuneLogger, OutputHandler
 
+from models.premade import make_resnet_18
 from utils.ignite_utils import PositiveShare, Variance, Average
 from utils.tokens import NEPTUNE_API_TOKEN
 
@@ -36,16 +34,19 @@ def binarize_sigmoid(y_pred):
     y_sig = nn.Sigmoid()(y_pred)
     return torch.ge(y_sig, 0.5).int()
 
+
 # if we have an FC as the last layer
 def binarize_softmax(y_pred):
     sm = nn.Softmax(dim=1)(y_pred)
     _, i = torch.max(sm, dim=1)
     return i
 
+
 def binarize_output(output):
     y_pred, y = output['y_pred'], output['y']
     y_pred = binarize_sigmoid(y_pred)
     return y_pred, y
+
 
 def fix_seed(seed):
     torch.manual_seed(seed)
@@ -54,6 +55,7 @@ def fix_seed(seed):
 
 
 def train_model(config):
+    print(config)
     seed = config.get('seed', 42)
     fix_seed(seed)
 
@@ -88,8 +90,21 @@ def train_model(config):
     classifier = config.get('classifier', 'fc')
     mil_mode = config.get('mil_mode', 'embedding')
 
+    attribute = config.get('prediction_target', 'Age')
+
+    # for now hard code the type of problem based on the attribute
+    problems = {'Sex': 'binary_classification', 'Age': 'regression', 'BMI': 'regression'}
+    if attribute not in problems:
+        raise ValueError(f'Unknown attribute {attribute}')
+    is_classification = (problems[attribute] == 'binary_classification')
+
     # TRAINING ASPECTS
     batch_size = config.get('batch_size', 4)
+
+    # if backend_mode != 'extract_only' and batch_size > 2:
+    #     print(f'Limiting batch size for non-extractive training.')
+    #     batch_size = 2
+
     lr = config.get('lr', 0.001)
     n_epochs = config.get('n_epochs', 20)
 
@@ -97,7 +112,6 @@ def train_model(config):
     # hand over to backend
     backend_kwargs = {'pretrained': pretrained, 'feature_extraction': feature_extraction, 'in_channels': in_channels}
 
-    data_source = config.get('data_source', 'umc')
     use_pseudopatients = config.get('use_pseudopatients', False)
 
     # CONFIG ASPECTS
@@ -107,14 +121,12 @@ def train_model(config):
     # as this incurs overhead, it can be turned off, then the results computed after each batch during the epoch
     # will be used instead
     log_training_metrics_clean = False
-
+    project_name = 'createrandom/mus-' + attribute
     npt_logger = NeptuneLogger(api_token=NEPTUNE_API_TOKEN,
-                               project_name='createrandom/sandbox',
-                               name='multi_input', params=config, offline_mode=False)
+                               project_name=project_name,
+                               name='multi_input', params=config, offline_mode=True)
 
-    # TODO refactor data loading
     current_host = socket.gethostname()
-    data_path = 'data/devices/'
     if current_host == 'pop-os':
         mnt_path = '/mnt/chansey/'
     else:
@@ -122,82 +134,63 @@ def train_model(config):
 
     print(f'Using mount_path: {mnt_path}')
 
-    attribute = 'Sex'
-    # todo infer or hard code the type of problem based on the attribute
-    is_classification = True
+    # paths to the different datasets
+    umc_data_path = os.path.join(mnt_path, 'klaus/data/devices/')
+    umc_img_root = os.path.join(mnt_path, 'klaus/total_patients/')
+    jhu_data_path = os.path.join(mnt_path, 'klaus/myositis/')
+    jhu_img_root = os.path.join(mnt_path, 'klaus/myositis/processed_imgs')
 
     # for each device, we have a test, val and a test set
+    device_mapping = {'ESAOTE_6100': 'umc', 'GE_Logiq_E': 'jhu', 'Philips_iU22': 'umc'}
+    device_splits = {'ESAOTE_6100': ['train', 'val', 'test'], 'GE_Logiq_E': ['im_muscle_chart'],
+                     'Philips_iU22': ['train', 'val', 'test']}
+
+    label_paths = {'umc': umc_data_path, 'jhu': jhu_data_path}
+    img_root_paths = {'umc': umc_img_root, 'jhu': jhu_img_root}
+    set_specs = []
+    for device, dataset_type in device_mapping.items():
+        # get the splits
+        splits = device_splits[device]
+        label_path = label_paths[dataset_type]
+        img_root_path = img_root_paths[dataset_type]
+        for split in splits:
+            set_specs.append(SetSpec(device, dataset_type, split, label_path, img_root_path))
 
     # the sets we need: supervised train, unsupervised train (potentially)
     # any number of validation sets
 
-    # 'target_train': ['Philips_iU22/train']
-    set_spec = {'source_train': ['ESAOTE_6100/train'],
-                'val': [('ESAOTE_6100/val'), ('Philips_iU22/val')]}
+    # 'target_train': SetSpec('Philips_iU22', 'umc', 'train', umc_data_path)
+    desired_set_specs = {'source_train': [SetSpec('ESAOTE_6100', 'umc', 'train', umc_data_path, umc_img_root)],
+                         'val': [SetSpec('ESAOTE_6100', 'umc', 'val', umc_data_path, umc_img_root),
+                                 SetSpec('Philips_iU22', 'umc', 'val', umc_data_path, umc_img_root),
+                                 SetSpec('GE_Logiq_E', 'jhu', 'im_muscle_chart', jhu_data_path, jhu_img_root)]}
 
     set_loaders = {}
 
-    if data_source == 'myositis':
-        normalizer_name = 'GE_Logiq_E'
-        mnt_path = '/home/klux/Thesis_2/data'
-        train_path = os.path.join(mnt_path, 'klaus/myositis/train.csv')
-        val_path = os.path.join(mnt_path, 'klaus/myositis/val.csv')
-        img_folder = os.path.join(mnt_path, 'klaus/myositis/processed_imgs')
-        train_loader, val_loader = make_myositis_loaders(train_path, val_path, img_folder, use_one_channel,
-                                                         normalizer_name, attribute, batch_size,
-                                                         use_pseudopatients, is_classification=is_classification,
-                                                         pin_memory=use_cuda)
+    for set_name, set_spec_list in desired_set_specs.items():
 
-    # for purposes of comparison
-    elif data_source == 'mnist_bags':
-        train_loader = DataLoader(MnistBags(target_number=9,
-                                            mean_bag_length=20,
-                                            var_bag_length=2,
-                                            num_bag=200,
-                                            seed=42,
-                                            train=True),
-                                  batch_size=1,
-                                  shuffle=True)
+        loaders = []
+        for set_spec in set_spec_list:
+            data = get_data_for_spec(set_spec, loader_type='image',attribute=attribute)
+            use_pseudopatient_locally = (set_name != 'val') & use_pseudopatients
+            img_path = set_spec.img_root_path
+            # loader = make_bag_loader(data, img_path, use_one_channel, normalizer_name,
+            #                          attribute, batch_size, set_spec.device, use_pseudopatients=use_pseudopatient_locally,
+            #                          is_classification=is_classification, pin_memory=use_cuda)
 
-        val_loader = DataLoader(MnistBags(target_number=9,
-                                          mean_bag_length=10,
-                                          var_bag_length=2,
-                                          num_bag=50,
-                                          seed=42,
-                                          train=False),
-                                batch_size=1,
-                                shuffle=False)
-    elif data_source == 'umc':
-        img_folder = os.path.join(mnt_path, 'klaus/total_patients/')
+            loader = make_image_loader(data, img_path, use_one_channel, normalizer_name,
+                                     attribute, batch_size, set_spec.device,
+                                     is_classification=is_classification, pin_memory=use_cuda)
 
-        for set_name, set_paths in set_spec.items():
+            loaders.append(loader)
 
-            loaders = []
-            for set_path in set_paths:
+        set_loaders[set_name] = loaders
 
-                to_load = os.path.join(data_path, set_path)
+    # model = MultiInputNet(backend=backend, mil_pooling=mil_pooling,
+    #                       classifier=classifier, mode=mil_mode, backend_kwargs=backend_kwargs)
 
-                patients = preprocess_umc_patients_new(os.path.join(to_load, 'patients.pkl'),
-                                                          os.path.join(to_load, 'records.pkl'),
-                                                          os.path.join(to_load, 'images.pkl'),
-                                                          attribute_to_use=attribute)
-
-                device = set_path.split('/')[0]
-                use_pseudopatient_locally = (set_name != 'val') & use_pseudopatients
-
-                loader = make_umc_loader(patients, img_folder, use_one_channel, normalizer_name,
-                                               attribute, batch_size, device, use_pseudopatients=use_pseudopatient_locally,
-                                               is_classification=is_classification, pin_memory=use_cuda)
-
-                loaders.append(loader)
-
-            set_loaders[set_name] = loaders
-
-    else:
-        raise ValueError(f'Invalid data source : {data_source}')
-
-    model = MultiInputNet(backend=backend, mil_pooling=mil_pooling,
-                          classifier=classifier, mode=mil_mode, backend_kwargs=backend_kwargs)
+    model = make_resnet_18(num_classes=1, pretrained=pretrained, in_channels=in_channels,
+                           feature_extraction=feature_extraction)
 
     if is_classification:
         criterion = BCEWithLogitsLoss()  # BernoulliLoss
@@ -205,7 +198,6 @@ def train_model(config):
         criterion = MSELoss()
 
     # todo investigate / tune
-    # optimizer = optim.SGD(model.parameters(), lr)
     optimizer = optim.Adam(model.parameters(), lr)
 
     device = torch.device("cuda:0" if use_cuda else "cpu")
@@ -245,8 +237,8 @@ def train_model(config):
     metrics = {**metrics, **metrics_to_add}
 
     # attach metrics to the trainer
-    for name, metric in metrics.items():
-        metric.attach(trainer, name)
+    for set_spec, metric in metrics.items():
+        metric.attach(trainer, set_spec)
 
     # there are two ways to log metrics during training
     # one can log them during the epoch, after each batch
@@ -270,7 +262,8 @@ def train_model(config):
     # only if desired incur the extra overhead
     if log_training_metrics_clean:
         # make a separate evaluator and attach to it instead (do a clean pass)
-        train_evaluator = create_supervised_evaluator(model, metrics=metrics, device=device, output_transform=custom_output_transform_eval)
+        train_evaluator = create_supervised_evaluator(model, metrics=metrics, device=device,
+                                                      output_transform=custom_output_transform_eval)
         # enable training logging
         npt_logger.attach(train_evaluator,
                           log_handler=OutputHandler(tag="training_clean",
@@ -278,27 +271,31 @@ def train_model(config):
                                                     global_step_transform=global_step_from_engine(trainer)),
                           event_name=Events.EPOCH_COMPLETED)
 
-
     # for each validation set, create an evaluator and attach it to the logger
-    val_names = set_spec['val']
+    val_names = desired_set_specs['val']
     val_loaders = set_loaders['val']
     val_evaluators = []
 
-    for name, loader in zip(val_names, val_loaders):
-
+    for set_spec, loader in zip(val_names, val_loaders):
         val_evaluator = create_supervised_evaluator(model, metrics=metrics, device=device,
                                                     output_transform=custom_output_transform_eval)
         # enable validation logging
         npt_logger.attach(val_evaluator,
-                          log_handler=OutputHandler(tag=name,
+                          log_handler=OutputHandler(tag=str(set_spec),
                                                     metric_names=list(metrics.keys()),
                                                     global_step_transform=global_step_from_engine(trainer)),
                           event_name=Events.EPOCH_COMPLETED)
         val_evaluators.append(val_evaluator)
 
+    # todo migrate this to tensorboard
     # npt_logger.attach(trainer,
-    #                   log_handler=GradsScalarHandler(model),
-    #                   event_name=Events.ITERATION_COMPLETED(every=1))
+    #                    log_handler=GradsScalarHandler(model),
+    #                    event_name=Events.EPOCH_COMPLETED)
+    #
+    # npt_logger.attach(trainer,
+    #                    log_handler=WeightsScalarHandler(model),
+    #                    event_name=Events.EPOCH_COMPLETED)
+    #
 
     pbar = ProgressBar()
     pbar.attach(trainer)
@@ -313,25 +310,26 @@ def train_model(config):
         print(trainer.state.epoch, trainer.state.metrics)
         if log_training_metrics_clean:
             train_evaluator.run(train_loader)
-            print(train_evaluator.state.epoch, train_evaluator.state.metrics)
+            print(trainer.state.epoch, train_evaluator.state.metrics)
 
         # run on validation each set
         for val_evaluator, val_loader in zip(val_evaluators, val_loaders):
             val_evaluator.run(val_loader)
-            print(val_evaluator.state.epoch, val_evaluator.state.metrics)
+            print(trainer.state.epoch, val_evaluator.state.metrics)
 
-         #  tune.track.log(iter=evaluator.state.epoch, mean_accuracy=metrics['accuracy'])
+        #  tune.track.log(iter=evaluator.state.epoch, mean_accuracy=metrics['accuracy'])
 
     train_loader = set_loaders['source_train'][0]
     trainer.run(train_loader, max_epochs=n_epochs)
 
     npt_logger.close()
 
+
 if __name__ == '__main__':
     # TODO read out from argparse
-    config = {'backend_mode': 'extract_only',
+    config = {'prediction_target': 'Age', 'backend_mode': 'scratch',
               'backend': 'resnet-18', 'mil_pooling': 'mean', 'classifier': 'fc',
-              'mil_mode': 'embedding', 'batch_size': 1, 'lr': 0.1, 'n_epochs': 1,
-              'use_pseudopatients': False, 'data_source': 'umc'}
+              'mil_mode': 'embedding', 'batch_size': 8, 'lr': 0.1, 'n_epochs': 5,
+              'use_pseudopatients': False}
 
     train_model(config)

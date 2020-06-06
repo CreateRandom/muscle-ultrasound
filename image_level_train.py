@@ -19,7 +19,8 @@ import pandas as pd
 
 def make_loader(csv_path, root_folder, attribute, transform, batch_size, use_one_channel=False):
     meta_frame = pd.read_csv(csv_path)
-    ds = SingleImageDataset(meta_frame, root_folder, attribute, transform, use_one_channel)
+    ds = SingleImageDataset(meta_frame, root_folder, attribute=attribute, image_column='Image2D',
+                            transform=transform, use_one_channel=use_one_channel)
     loader = DataLoader(ds, batch_size=batch_size, shuffle=True, num_workers=4)
     return loader
 

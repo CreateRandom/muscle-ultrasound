@@ -1,7 +1,11 @@
+import os
+from functools import partial
+
 import PIL
 import PIL.Image
 
 import pydicom
+from PIL import Image
 
 from scipy.io import loadmat
 import numpy as np
@@ -64,7 +68,7 @@ def load_dicom(dicom_path, load_mask=False, use_one_channel=False):
     return im
 
 
-def load_img(img_name, use_one_channel=False):
+def load_pil_img(img_name, use_one_channel=False):
     # one or three channels
     mode = 'L' if use_one_channel else 'RGB'
     # load as PIL image
@@ -93,3 +97,26 @@ class FixedHeightCrop(object):
 
     def __repr__(self):
         return self.__class__.__name__ + '(remove_top={0}, remove_bottom={1})'.format(self.remove_top, self.remove_bottom)
+
+
+loader_funcs = {'.png': load_pil_img, '.jpg': load_pil_img, '.dcm': load_dicom}
+
+
+def load_image(img, root_dir, use_one_channel, use_mask):
+    name = str(img)
+    img_name = os.path.join(root_dir, name)
+    raw_name, extension = os.path.splitext(img_name)
+    loader_func = partial(loader_funcs[extension], use_one_channel=use_one_channel)
+    image = loader_func(img_name)
+    if use_mask:
+        # also optionally try loading the mask
+        try:
+            mat_file_path = raw_name + '.dcm.mat'
+            mask = create_mask(mat_file_path, image.size)
+            image2 = np.array(image)
+            mask = mask.transpose()
+            image2[~mask] = 0
+            image = Image.fromarray(image2)
+        except:
+            print(f'Error loading mask for {name}')
+    return image

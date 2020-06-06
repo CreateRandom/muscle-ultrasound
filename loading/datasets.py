@@ -1,69 +1,98 @@
 from functools import partial
 
-from PIL import Image
 from torch import is_tensor
 import os
 from torch.utils.data import Dataset
-from sklearn.preprocessing import LabelEncoder, label_binarize
+from sklearn.preprocessing import label_binarize
 from random import randint
 import numpy as np
 from tqdm import tqdm
 
-from loading.img_utils import load_dicom, load_img, create_mask
+from loading.img_utils import load_image
 from utils.utils import repeat_to_length
 import torch
 
+
 class SingleImageDataset(Dataset):
-    # for the use case where we want to classify single images as to the patient's diagnosis
-    def __init__(self, meta_frame, root_dir, attribute='Diagnosis', transform=None,
-                 use_one_channel=False, image_column='Image2D'):
+    # for the use case where we want to classify single images
+    def __init__(self, image_frame, root_dir, attribute='Diagnosis', image_column='ImagePath', transform=None,
+                 use_one_channel=False, is_classification=True, use_mask=False):
         """
         Args:
-            meta_frame (DataFrame): DataFrame containing image information
+            image_frame (DataFrame): DataFrame containing image information
             root_dir (string): Directory with all the images.
             attribute (string): The attribute to output. Default: Diagnosis.
         """
-        self.meta_frame = meta_frame
+        self.image_frame = image_frame
         self.root_dir = root_dir
         self.attribute = attribute
-        self.encoder = LabelEncoder()
-        self.encoder.fit(self.meta_frame[attribute])
+
         self.transform = transform
         self.use_one_channel = use_one_channel
         self.image_column = image_column
+        self.use_mask = use_mask
+
+        self.is_classification = is_classification
+        self.one_hot_encode_binary = False
+        # this needs to happen in case we treat this as a classification problem
+        if self.is_classification:
+            att_list = self.image_frame[self.attribute].to_list()
+            self.label_encoder = CustomLabelEncoder(att_list, self.one_hot_encode_binary)
 
     def __len__(self):
-        return len(self.meta_frame)
+        return len(self.image_frame)
 
     def __getitem__(self, idx):
         if is_tensor(idx):
             idx = idx.tolist()
-        sample = self.meta_frame.iloc[idx]
+        sample = self.image_frame.iloc[idx]
 
         img_name = os.path.join(self.root_dir, str(sample[self.image_column]))
 
-        _, extension = os.path.splitext(img_name)
-        loader_func = partial(loader_funcs[extension], use_one_channel=self.use_one_channel)
-        image = loader_func(img_name)
+        load_func = partial(load_image, root_dir=self.root_dir, use_one_channel=self.use_one_channel,
+                            use_mask=self.use_mask)
+        image = load_func(img_name)
 
         attribute_label = sample[self.attribute]
-        attribute_label = self.encoder.transform([attribute_label])
+        if self.is_classification:
+            attribute_label = self.label_encoder.get_classification_label(attribute_label)
 
         if self.transform:
             image = self.transform(image)
-        return image, attribute_label[0]
+        return image, attribute_label
 
-loader_funcs = {'.png': load_img, '.jpg': load_img, '.dcm': load_dicom}
+
+class CustomLabelEncoder(object):
+    def __init__(self, att_list, one_hot_encode_binary):
+        self.classes = list(set(att_list))
+        self.one_hot_encode_binary = one_hot_encode_binary
+        if len(self.classes) == 2 and self.one_hot_encode_binary:
+            # the label binarizer does not properly one-hot encode binary attributes, so we'll cheat
+            # add a dummy class and later remove it
+            self.classes = self.classes + ['dummy_label']
+
+    def get_classification_label(self, attribute_label):
+        transformed_label = label_binarize([attribute_label], classes=self.classes)
+        if 'dummy_label' in self.classes:
+            # drop the last column for the dummy class
+            transformed_label = transformed_label[:, 0:-1]
+        if self.one_hot_encode_binary:
+            label_to_return = transformed_label[0]
+        else:
+            label_to_return = transformed_label[0][0]
+
+        return label_to_return.astype(float)
+
 
 def select_latest(patient):
     return patient.select_latest()
 
+
 class PatientBagDataset(Dataset):
     def __init__(self, patient_list, root_dir,
                  use_pseudopatients, muscles_to_use=None,
-                 attribute='Diagnosis', transform=None, use_one_channel=True,
-                 is_classification=True,
-                 stack_images=True, use_mask=False, n_images_per_channel=1,
+                 attribute='Diagnosis', image_column='ImagePath', transform=None, use_one_channel=True,
+                 is_classification=True, use_mask=False, stack_images=True, n_images_per_channel=1,
                  merge_left_right=False):
         self.muscles_to_use = muscles_to_use
 
@@ -85,23 +114,18 @@ class PatientBagDataset(Dataset):
         self.root_dir = root_dir
         self.attribute = attribute
 
+        self.one_hot_encode_binary = False
         self.is_classification = is_classification
         # this needs to happen in case we treat this as a classification problem
         if self.is_classification:
-
             att_list = [x.attributes[self.attribute] for x in self.patients]
-            self.classes = list(set(att_list))
-            self.one_hot_encode_binary = False
-            if len(self.classes) == 2 and self.one_hot_encode_binary:
-                # the label binarizer does not properly one-hot encode binary attributes, so we'll cheat
-                # add a dummy class and later remove it
-                self.classes = self.classes + ['dummy_label']
+            self.label_encoder = CustomLabelEncoder(att_list, self.one_hot_encode_binary)
 
         self.transform = transform
         self.use_one_channel = use_one_channel
         self.stack_images = stack_images
         self.use_mask = use_mask
-
+        self.image_column = image_column
         # these parameters control what's in the bag
         self.n_images_per_channel = n_images_per_channel
         # whether to bundle up images of the same muscle from left and right
@@ -121,61 +145,29 @@ class PatientBagDataset(Dataset):
         if self.muscles_to_use is not None:
             image_frame = image_frame['Muscle'].isin(self.muscles_to_use)
 
-        def load_image(img):
-            name = str(img)
-            img_name = os.path.join(self.root_dir, name)
-            raw_name, extension = os.path.splitext(img_name)
-            loader_func = partial(loader_funcs[extension], use_one_channel=self.use_one_channel)
-            image = loader_func(img_name)
-            if self.use_mask:
-                # also optionally try loading the mask
-                try:
-                    mat_file_path = raw_name + '.dcm.mat'
-                    mask = create_mask(mat_file_path, image.size)
-                    image2 = np.array(image)
-                    mask = mask.transpose()
-                    image2[~mask] = 0
-                    image = Image.fromarray(image2)
-                except:
-                    print(f'Error loading mask for {name}')
-            return image
-
         # retain n images for each muscle (and side) (n=1 --> the first image)
         image_frame = image_frame.groupby(self.grouper).head(self.n_images_per_channel)
-        imgs = image_frame['ImagePath'].apply(load_image).to_list()
 
+        load_func = partial(load_image, root_dir=self.root_dir, use_one_channel=self.use_one_channel,
+                            use_mask=self.use_mask)
+
+        imgs = image_frame[self.image_column].apply(load_func).to_list()
         if self.transform:
             imgs = [self.transform(image) for image in imgs]
-
         # stack up the tensors at the end
         if self.stack_images:
             imgs = torch.stack(imgs)
+
+        attribute_label = patient.attributes[self.attribute]
+        # transform into classes if so desired
         if self.is_classification:
-            label_to_return = self.get_classification_label(patient=patient)
-        else:
-            label_to_return = self.get_regression_label(patient=patient)
+            attribute_label = self.label_encoder.get_classification_label(attribute_label=attribute_label)
 
-        return imgs, label_to_return
-
-    def get_regression_label(self,patient):
-        attribute_label = patient.attributes[self.attribute]
-        return attribute_label
-
-    def get_classification_label(self, patient):
-        attribute_label = patient.attributes[self.attribute]
-        transformed_label = label_binarize([attribute_label], classes=self.classes)
-        if 'dummy_label' in self.classes:
-            # drop the last column for the dummy class
-            transformed_label = transformed_label[:, 0:-1]
-        if self.one_hot_encode_binary:
-            label_to_return = transformed_label[0]
-        else:
-            label_to_return = transformed_label[0][0]
-
-        return label_to_return.astype(float)
+        return imgs, [attribute_label]
 
     def __len__(self):
         return len(self.patients)
+
 
 class Patient(object):
     def __init__(self, records, attributes):
@@ -196,16 +188,17 @@ class Patient(object):
             for record in self.records:
                 date = record.meta_info['RecordingDate']
                 dates.append(date)
-            self.record_to_use = np.argmax(dates,0)
+            self.record_to_use = np.argmax(dates, 0)
 
     def make_pseudopatients(self, muscles=None, method='each_once', n_limit=100):
         record = self.records[self.record_to_use]
-        pseudorecords = make_pseudorecords(record,muscles,method,n_limit)
+        pseudorecords = make_pseudorecords(record, muscles, method, n_limit)
         pseudopatients = []
         for record in pseudorecords:
             p = Patient([record], self.attributes)
             pseudopatients.append(p)
         return pseudopatients
+
 
 class PatientRecord(object):
     def __init__(self, r_id, image_frame, meta_info=None):
@@ -230,7 +223,8 @@ def make_pseudorecords(record, muscles=None, method='each_once', n_limit=100):
 
     max_len = max([len(img_list) for img_list in img_lists])
     # make sure the lists all have the same length
-    img_lists = [img_list if len(img_list) == max_len else repeat_to_length(img_list, max_len) for img_list in img_lists]
+    img_lists = [img_list if len(img_list) == max_len else repeat_to_length(img_list, max_len) for img_list in
+                 img_lists]
 
     # make all combinations where each image is used exactly once
     if method == 'each_once':
@@ -264,26 +258,4 @@ def make_pseudorecords(record, muscles=None, method='each_once', n_limit=100):
 
     return pseudorecords
 
-def parse_image_level_frame(frame):
-    frame.rename(inplace=True,columns={'Image2D': 'ImagePath'})
-    image_columns = ['ImagePath', 'Muscle', 'Side']
-    fixed_info_columns = frame.columns[~frame.columns.isin(image_columns)]
-    patient_info_frame = frame[fixed_info_columns]
-    info_by_patient = patient_info_frame.groupby('PatientID').first()
 
-    image_frame = frame[['PatientID', 'ImagePath', 'Muscle', 'Side']]
-    images_by_patient = image_frame.groupby('PatientID')
-    images_by_patient = {pid: frame for pid, frame in images_by_patient}
-
-    def parse_patient(patient):
-        pid = patient.name
-        info = info_by_patient.loc[pid].copy()
-        # create a record from the image table
-        image_frame = images_by_patient[pid]
-        pr = PatientRecord(r_id=pid + '_rec', image_frame=image_frame)
-        p = Patient(records=[pr], attributes=info.to_dict())
-        return p
-
-    patient_list = info_by_patient.apply(parse_patient, axis=1).to_list()
-
-    return patient_list
