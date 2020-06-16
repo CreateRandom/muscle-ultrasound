@@ -1,8 +1,9 @@
+import functools
+
 import torch
 
 from torch import nn
-import torch.nn.functional as F
-
+import numpy as np
 from models.mil_pooling import MaxMIL, AttentionMIL, AverageMIL, GatedAttentionMIL
 from models.premade import make_resnet_18, make_alexnet
 
@@ -102,10 +103,11 @@ def make_alex_backend(use_embedding, backend_kwargs):
 
 
 backend_funcs = {'resnet-18': make_resnet_backend, 'default': make_default_backend, 'alexnet': make_alex_backend}
-
+cnn_constructors = {'resnet-18': make_resnet_18, 'alexnet': make_alexnet}
 # for now, we will always assume binary classification, maybe later see how to expand this
 class MultiInputNet(nn.Module):
-    def __init__(self, backend='alexnet', mil_pooling='attention', classifier='fc', mode='embedding', out_dim=1,
+    def __init__(self, backend='alexnet', mil_pooling='attention', mode='embedding', out_dim=1,
+                 fc_hidden_layers=False, fc_use_bn=False,
                  backend_kwargs=None):
         super(MultiInputNet, self).__init__()
         self.backend_type = backend
@@ -113,17 +115,23 @@ class MultiInputNet(nn.Module):
         self.backend_kwargs = {} if not backend_kwargs else backend_kwargs
         self.out_dim = out_dim
         self.mil_pooling_type = mil_pooling
-        self.classifier_type = classifier
-        # TODO allow for multiple backends
+        # allows for multiple backends
         self.backend, self.backend_out_dim = self.make_backend(backend, mode, self.backend_kwargs)
-        # TODO allow for multiple pooling functions
+        # allows for multiple pooling functions
         self.mil_pooling = self.make_mil_pooling(mil_pooling, self.backend_out_dim)
-        # TODO allow for multiple classifiers
-        self.classifier = self.make_classifier(classifier, self.backend_out_dim, self.out_dim)
+        # allow for variation
+        # hidden_dims, in_dim, out_dim, activation='relu', bn=True
+        # add a hidden dimension with half the size of the backend output
+        if fc_hidden_layers:
+            self.hidden_dims = [int(np.ceil(self.backend_out_dim / 2))]
+        else:
+            self.hidden_dims = []
+        self.classifier = self.make_classifier(hidden_dims=self.hidden_dims, in_dim=self.backend_out_dim,
+                                               out_dim=self.out_dim, activation='leaky_relu',bn=fc_use_bn)
 
     def __str__(self):
         return f'MultiInputNet with {self.backend_type} ' \
-               f'backend, {self.mil_pooling_type} mil and {self.classifier_type} classifier'
+               f'backend, {self.mil_pooling_type} mil and {self.hidden_dims} classifier'
 
     # for the case where the batch size is one
     def forward_single(self, x):
@@ -145,18 +153,34 @@ class MultiInputNet(nn.Module):
         # n_patients = x.shape[-5]
         # n_images_per_patient = x.shape[-4]
         # all_images_flat = x.reshape(-1, x.shape[-3], x.shape[-2], x.shape[-1])
-        all_mats_flat = self.backend(img_rep)
 
+        # get the backend output for all images at the same time
+        all_mats_flat = self.backend(img_rep)
+        # split by patient
         pwise_images = torch.split(all_mats_flat, n_images_per_bag)
 
         # reshape back to original format
         # mil_inputs = all_mats_flat.reshape(n_patients, n_images_per_patient, self.backend_out_dim)
         pooled = []
-        for elem in pwise_images:
-            pooled.append(self.classifier(self.mil_pooling(elem)).squeeze())
-        tester = torch.stack(pooled)
+        # for elem in pwise_images:
+        #     pooled.append(self.classifier(self.mil_pooling(elem)).squeeze())
+        # pooled = torch.stack(pooled)
 
-        return tester
+        for elem in pwise_images:
+            pooled.append(self.mil_pooling(elem).squeeze())
+        pooled = torch.stack(pooled)
+
+        # ensure batch first format
+        if pooled.ndimension() == 1:
+             pooled = pooled.unsqueeze(0)
+
+        pooled = self.classifier(pooled)
+
+        # ensure batch first format
+        if pooled.ndimension() == 1:
+            pooled = pooled.unsqueeze(1)
+
+        return pooled
 
     @staticmethod
     def make_backend(backend_name, mode, backend_kwargs):
@@ -166,7 +190,6 @@ class MultiInputNet(nn.Module):
         use_embedding = (mode == 'embedding')
         backend, out_dim = backend_func(use_embedding, backend_kwargs)
 
-        # TODO come up with a more general way to do this
         if mode == 'embedding':
             backend = nn.Sequential(backend, nn.ReLU())
         elif mode == 'instance':
@@ -189,10 +212,29 @@ class MultiInputNet(nn.Module):
             raise ValueError(f'Invalid MIL type: {type}')
 
     @staticmethod
-    def make_classifier(type, in_dim, out_dim):
-        classifier = nn.Sequential(
-            nn.Linear(in_dim, out_dim),
-        )
+    def make_classifier(hidden_dims, in_dim, out_dim, activation='relu', bn=False):
+
+        mlp = []
+
+        if activation == 'relu':
+            act_fn = functools.partial(nn.ReLU, inplace=True)
+        elif activation == 'leaky_relu':
+            act_fn = functools.partial(nn.LeakyReLU, inplace=True)
+        else:
+            raise NotImplementedError
+        for hidden_dim in hidden_dims:
+            mlp += [nn.Linear(in_dim, hidden_dim)]
+            if bn:
+                # input needs to be batch * in * (channels)
+                mlp += [nn.BatchNorm1d(hidden_dim)]
+            mlp += [act_fn()]
+            in_dim = hidden_dim
+
+        # add the readout layer at the very end
+        mlp += [nn.Linear(in_dim, out_dim)]
+        # connect into sequential
+        classifier = nn.Sequential(*mlp)
+
         return classifier
 
 def BernoulliLoss(output, target):

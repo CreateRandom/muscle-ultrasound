@@ -1,7 +1,7 @@
 import multiprocessing
 import os
 from dataclasses import dataclass
-from typing import List
+from typing import List, Union
 
 import pandas as pd
 import torch
@@ -16,12 +16,21 @@ from loading.img_utils import FixedHeightCrop
 from utils.utils import compute_normalization_parameters
 
 
-def load_myositis_images(csv_path):
+def load_myositis_images(csv_path, muscles_to_use=None) -> pd.DataFrame:
     image_frame = pd.read_csv(csv_path)
     # add image format
     image_frame['ImagePath'] = image_frame['Image2D'].apply(lambda x: str(x) + '.jpg')
     image_frame['Side'] = image_frame['Muscle'].astype(str).apply(lambda x: x[0])
     image_frame['Muscle'] = image_frame['Muscle'].astype(str).apply(lambda x: x[1:])
+    image_frame['Muscle'].replace({'D': 'Deltoideus', 'B': 'Biceps brachii','FCR': 'Flexor carpi radialis',
+                                   'T': 'Tibialis anterior','R': 'Rectus femoris', 'G': 'Gastrocnemius medial head',
+                                    'FDP': 'Flexor digitorum profundus'}, inplace=True)
+
+    image_frame['Class'] = image_frame['Muscle'].replace({'N': 'No NMD', 'I': 'NMD', 'P': 'NMD',
+                                   'D': 'NMD'})
+
+    if muscles_to_use:
+        image_frame = image_frame[image_frame['Muscle'].isin(muscles_to_use)]
 
     return image_frame
 
@@ -33,6 +42,10 @@ resize_params = {'ESAOTE_6100': {'center_crop': (480, 503)},
                  'GE_Logiq_E': {'center_crop': (480, 503)},
                  'Philips_iU22': {'fixed_height': (29, 71), 'center_crop': (561, 588), 'resize': (480, 503)}}
 
+resize_params_limited = {'ESAOTE_6100': {'center_crop': (480, 480), 'resize': (224, 224)},
+                 'GE_Logiq_E': {'center_crop': (480, 480), 'resize': (224, 224)},
+                 'Philips_iU22': {'fixed_height': (29, 71), 'center_crop': (561, 561), 'resize': (224, 224)}}
+
 
 # Esaote machine standard image size: 480 * 503 (narrower images are 480 * 335)
 # Philips: 661 * 588, more variation in the latter domain
@@ -40,10 +53,12 @@ resize_params = {'ESAOTE_6100': {'center_crop': (480, 503)},
 
 # center crop esoate and myo to 480 * 503
 # center philips to the corresponding 561 * 588, then scale down
-def make_basic_transform(resize_option_name, normalizer_name=None):
+def make_basic_transform(resize_option_name, normalizer_name=None, limit_image_size=False):
     t_list = []
-
-    resize_dict = resize_params[resize_option_name]
+    if limit_image_size:
+        resize_dict = resize_params_limited[resize_option_name]
+    else:
+        resize_dict = resize_params[resize_option_name]
 
     if 'fixed_height' in resize_dict:
         resize_tuple = resize_dict['fixed_height']
@@ -73,7 +88,7 @@ def make_basic_transform(resize_option_name, normalizer_name=None):
 
 
 def umc_to_image_frame(patient_path, record_path, image_path, attribute_to_use=None,
-                       muscles_to_use=None) -> pd.DataFrame:
+                       muscles_to_use=None, class_values=None) -> pd.DataFrame:
     patients = pd.read_pickle(patient_path)
 
     records = pd.read_pickle(record_path)
@@ -96,14 +111,19 @@ def umc_to_image_frame(patient_path, record_path, image_path, attribute_to_use=N
     images = pd.merge(images, patients, on=['pid'], how='left')
 
     if attribute_to_use:
-        patients.dropna(subset=[attribute_to_use], inplace=True)
-        images = images[images['pid'].isin(patients.pid)]
-        print(f'Retained {len(images)} images from {len(patients)} patients after dropping null values.')
-
+        images.dropna(subset=[attribute_to_use], inplace=True)
+        print(f'Retained {len(images)} images after dropping null values.')
+        if class_values:
+            drop_values = set(images[~images[attribute_to_use].isin(class_values)][attribute_to_use])
+            if drop_values:
+                patients = images[images[attribute_to_use].isin(class_values)]
+                print(
+                    f'Retained {len(patients)} images after dropping {drop_values}.')
     return images
 
 
-def umc_to_patient_list(patient_path, record_path, image_path, attribute_to_use=None, muscles_to_use=None) -> List[
+def umc_to_patient_list(patient_path, record_path, image_path, attribute_to_use=None, muscles_to_use=None,
+                        class_values=None) -> List[
     Patient]:
     patients = pd.read_pickle(patient_path)
 
@@ -117,7 +137,14 @@ def umc_to_patient_list(patient_path, record_path, image_path, attribute_to_use=
         images = images[images['rid'].isin(records.rid)]
         print(
             f'Retained {len(patients)} patients, {len(records)} records and {len(images)} images after dropping null values.')
-
+        if class_values:
+            drop_values = set(patients[~patients[attribute_to_use].isin(class_values)][attribute_to_use])
+            if drop_values:
+                patients = patients[patients[attribute_to_use].isin(class_values)]
+                records = records[records.pid.isin(set(patients.index))]
+                images = images[images['rid'].isin(records.rid)]
+                print(
+                    f'Retained {len(patients)} patients, {len(records)} records and {len(images)} images after dropping {drop_values}.')
     if muscles_to_use:
         images = images[images['Muscle'].isin(muscles_to_use)]
         # drop records that don't have this muscle
@@ -178,35 +205,40 @@ def get_n_cpu():
     return n_cpu
 
 def make_bag_loader(patients: List[Patient], img_folder, use_one_channel, normalizer_name, attribute, batch_size,
-                    device,
-                    use_pseudopatients=False, is_classification=True, pin_memory=False):
-    transform = make_basic_transform(device, normalizer_name=normalizer_name)
+                    device, limit_image_size,
+                    use_pseudopatients=False, pin_memory=False, label_encoder=None):
+    transform = make_basic_transform(device, normalizer_name=normalizer_name, limit_image_size=limit_image_size)
     # TODO allow comparison of different methods for using pseudopatients
     ds = PatientBagDataset(patient_list=patients, root_dir=img_folder,
                            attribute=attribute, transform=transform, use_pseudopatients=use_pseudopatients,
-                           muscles_to_use=None, use_one_channel=use_one_channel, is_classification=is_classification)
+                           muscles_to_use=None, use_one_channel=use_one_channel, label_encoder= label_encoder)
     n_cpu = get_n_cpu()
     loader = DataLoader(ds, batch_size=batch_size, shuffle=True, num_workers=n_cpu, collate_fn=collate_bags_to_batch,
-                        pin_memory=pin_memory)
+                        pin_memory=pin_memory, drop_last=True)
 
     return loader
 
 def make_image_loader(image_frame: pd.DataFrame, img_folder, use_one_channel, normalizer_name, attribute, batch_size,
-                    device, is_classification=True, pin_memory=False):
+                      device, limit_image_size, pin_memory=False, label_encoder=None, is_multi=False):
 
-    transform = make_basic_transform(device, normalizer_name=normalizer_name)
+    transform = make_basic_transform(device, normalizer_name=normalizer_name, limit_image_size=limit_image_size)
 
-    def collate_images(batch):
+    def collate_images_binary(batch):
         batch = default_collate(batch)
-        # ensure no single-dim tensors (always batch_size first)
+        # ensure no single-dim tensors for binary problems, needs to be single dim for multiclass though!
         batch = [elem if len(elem.shape) > 1 else elem.unsqueeze(1) for elem in batch]
         return batch
 
     ds = SingleImageDataset(image_frame=image_frame,root_dir=img_folder,attribute=attribute,transform=transform,
-                            use_one_channel=use_one_channel,is_classification=is_classification)
+                            use_one_channel=use_one_channel, label_encoder=label_encoder)
 
     n_cpu = get_n_cpu()
-    loader = DataLoader(ds, batch_size=batch_size, shuffle=True, num_workers=n_cpu, collate_fn=collate_images, pin_memory=pin_memory)
+    # use default
+    collate_fn = None
+    if not is_multi:
+        collate_fn = collate_images_binary
+    loader = DataLoader(ds, batch_size=batch_size, shuffle=True, num_workers=n_cpu, collate_fn=collate_fn, pin_memory=pin_memory,
+                        drop_last=True)
 
     return loader
 
@@ -244,7 +276,17 @@ class SetSpec:
     def __str__(self):
         return self.device + '/' + self.split
 
-def get_data_for_spec(set_spec : SetSpec, loader_type='bag', attribute='Class'):
+def get_classes(data: Union[pd.DataFrame, List[Patient]], attribute):
+    if isinstance(data,pd.DataFrame):
+        freq_counts = data[attribute].value_counts()
+        print(freq_counts)
+        return set(data[attribute])
+    elif isinstance(data, list):
+        atts = [patient.attributes[attribute] for patient in data]
+        print(pd.Series(atts).value_counts())
+        return set(atts)
+
+def get_data_for_spec(set_spec : SetSpec, loader_type='bag', attribute='Class', class_values=None, muscles_to_use=None):
     dataset_type = set_spec.dataset_type
     data_path = set_spec.label_path
     device_name = set_spec.device
@@ -258,7 +300,7 @@ def get_data_for_spec(set_spec : SetSpec, loader_type='bag', attribute='Class'):
             patients = umc_to_patient_list(os.path.join(to_load, 'patients.pkl'),
                                            os.path.join(to_load, 'records.pkl'),
                                            os.path.join(to_load, 'images.pkl'),
-                                           attribute_to_use=attribute)
+                                           attribute_to_use=attribute, class_values=class_values,muscles_to_use=muscles_to_use)
             return patients
 
         elif loader_type == 'image':
@@ -266,7 +308,7 @@ def get_data_for_spec(set_spec : SetSpec, loader_type='bag', attribute='Class'):
             images = umc_to_image_frame(os.path.join(to_load, 'patients.pkl'),
                                         os.path.join(to_load, 'records.pkl'),
                                         os.path.join(to_load, 'images.pkl'),
-                                        attribute_to_use=attribute)
+                                        attribute_to_use=attribute, class_values=class_values,muscles_to_use=muscles_to_use)
 
             return images
 
@@ -275,7 +317,14 @@ def get_data_for_spec(set_spec : SetSpec, loader_type='bag', attribute='Class'):
     elif dataset_type == 'jhu':
         csv_name = set_spec.split + '.csv'
         to_load = os.path.join(data_path, csv_name)
-        image_frame = load_myositis_images(to_load)
+        image_frame = load_myositis_images(to_load, muscles_to_use=muscles_to_use)
+
+        if class_values:
+            drop_values = set(image_frame[~image_frame[attribute].isin(class_values)][attribute])
+            if drop_values:
+                patients = image_frame[image_frame[attribute].isin(class_values)]
+                print(
+                    f'Retained {len(image_frame)} images after dropping {drop_values}.')
 
         if loader_type == 'bag':
             return image_frame_to_patients(image_frame)

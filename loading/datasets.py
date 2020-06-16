@@ -16,7 +16,7 @@ import torch
 class SingleImageDataset(Dataset):
     # for the use case where we want to classify single images
     def __init__(self, image_frame, root_dir, attribute='Diagnosis', image_column='ImagePath', transform=None,
-                 use_one_channel=False, is_classification=True, use_mask=False):
+                 use_one_channel=False, use_mask=False, label_encoder=None):
         """
         Args:
             image_frame (DataFrame): DataFrame containing image information
@@ -32,15 +32,18 @@ class SingleImageDataset(Dataset):
         self.image_column = image_column
         self.use_mask = use_mask
 
-        self.is_classification = is_classification
         self.one_hot_encode_binary = False
-        # this needs to happen in case we treat this as a classification problem
-        if self.is_classification:
-            att_list = self.image_frame[self.attribute].to_list()
-            self.label_encoder = CustomLabelEncoder(att_list, self.one_hot_encode_binary)
+
+        self.label_encoder = label_encoder
 
     def __len__(self):
         return len(self.image_frame)
+
+    def get_all_labels(self):
+        labels = self.image_frame[self.attribute]
+        if self.label_encoder:
+            labels = [self.label_encoder.get_classification_label(l) for l in labels]
+        return labels
 
     def __getitem__(self, idx):
         if is_tensor(idx):
@@ -54,7 +57,7 @@ class SingleImageDataset(Dataset):
         image = load_func(img_name)
 
         attribute_label = sample[self.attribute]
-        if self.is_classification:
+        if self.label_encoder:
             attribute_label = self.label_encoder.get_classification_label(attribute_label)
 
         if self.transform:
@@ -63,10 +66,11 @@ class SingleImageDataset(Dataset):
 
 
 class CustomLabelEncoder(object):
-    def __init__(self, att_list, one_hot_encode_binary):
+    def __init__(self, att_list, one_hot_encode):
         self.classes = list(set(att_list))
-        self.one_hot_encode_binary = one_hot_encode_binary
-        if len(self.classes) == 2 and self.one_hot_encode_binary:
+        self.one_hot_encode = one_hot_encode
+        self.is_binary = len(self.classes) == 2
+        if self.is_binary and self.one_hot_encode:
             # the label binarizer does not properly one-hot encode binary attributes, so we'll cheat
             # add a dummy class and later remove it
             self.classes = self.classes + ['dummy_label']
@@ -76,12 +80,16 @@ class CustomLabelEncoder(object):
         if 'dummy_label' in self.classes:
             # drop the last column for the dummy class
             transformed_label = transformed_label[:, 0:-1]
-        if self.one_hot_encode_binary:
-            label_to_return = transformed_label[0]
-        else:
-            label_to_return = transformed_label[0][0]
 
-        return label_to_return.astype(float)
+        if ~self.one_hot_encode and self.is_binary:
+            # return a scalar
+            label_to_return = transformed_label[0][0].astype(float)
+        elif ~self.one_hot_encode:
+            label_to_return = np.argmax(transformed_label[0])
+        else:
+            # return an array
+            label_to_return = transformed_label[0]
+        return label_to_return
 
 
 def select_latest(patient):
@@ -92,8 +100,8 @@ class PatientBagDataset(Dataset):
     def __init__(self, patient_list, root_dir,
                  use_pseudopatients, muscles_to_use=None,
                  attribute='Diagnosis', image_column='ImagePath', transform=None, use_one_channel=True,
-                 is_classification=True, use_mask=False, stack_images=True, n_images_per_channel=1,
-                 merge_left_right=False):
+                 use_mask=False, stack_images=True, n_images_per_channel=1,
+                 merge_left_right=False, label_encoder=None):
         self.muscles_to_use = muscles_to_use
 
         # a policy for record selection, TODO allow modification
@@ -115,11 +123,7 @@ class PatientBagDataset(Dataset):
         self.attribute = attribute
 
         self.one_hot_encode_binary = False
-        self.is_classification = is_classification
-        # this needs to happen in case we treat this as a classification problem
-        if self.is_classification:
-            att_list = [x.attributes[self.attribute] for x in self.patients]
-            self.label_encoder = CustomLabelEncoder(att_list, self.one_hot_encode_binary)
+        self.label_encoder = label_encoder
 
         self.transform = transform
         self.use_one_channel = use_one_channel
@@ -134,6 +138,12 @@ class PatientBagDataset(Dataset):
             self.grouper = ['Muscle']
         else:
             self.grouper = ['Muscle', 'Side']
+
+    def get_all_labels(self):
+        labels = [patient.attributes[self.attribute] for patient in self.patients]
+        if self.label_encoder:
+            labels = [self.label_encoder.get_classification_label(l) for l in labels]
+        return labels
 
     def __getitem__(self, idx):
         if is_tensor(idx):
@@ -160,7 +170,7 @@ class PatientBagDataset(Dataset):
 
         attribute_label = patient.attributes[self.attribute]
         # transform into classes if so desired
-        if self.is_classification:
+        if self.label_encoder:
             attribute_label = self.label_encoder.get_classification_label(attribute_label=attribute_label)
 
         return imgs, [attribute_label]

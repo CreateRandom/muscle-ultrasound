@@ -4,6 +4,8 @@ from typing import Any, Callable, Optional, Union
 
 import torch
 from ignite.metrics import Metric
+from torch import nn
+
 
 class SimpleAccumulator(Metric):
     def __init__(self, output_transform: Callable = lambda x: x, device: Optional[Union[str, torch.device]] = None):
@@ -44,3 +46,21 @@ class Variance(SimpleAccumulator):
 class Average(SimpleAccumulator):
     def compute(self) -> Any:
         return np.mean(self.values)
+
+
+def binarize_softmax(output):
+    y_pred, y = output['y_pred'], output['y']
+    sm = nn.Softmax(dim=1)(y_pred)
+    _, i = torch.max(sm, dim=1)
+    # y_pred = i
+
+    y_pred = torch.nn.functional.one_hot(i,sm.shape[1])
+   # y = torch.nn.functional.one_hot(y,sm.shape[1])
+    return y_pred, y
+
+
+def binarize_sigmoid(output):
+    y_pred, y = output['y_pred'], output['y']
+    y_pred = nn.Sigmoid()(y_pred)
+    y_pred = torch.ge(y_pred, 0.5).int()
+    return y_pred, y

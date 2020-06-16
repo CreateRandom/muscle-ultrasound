@@ -1,51 +1,35 @@
 import random
 
-from torch.nn import BCELoss, BCEWithLogitsLoss, MSELoss
+from sklearn.metrics import mean_absolute_error, accuracy_score
+from torch.nn import BCEWithLogitsLoss, MSELoss, CrossEntropyLoss
 
-from loading.loaders import make_bag_loader, umc_to_patient_list, \
-    SetSpec, get_data_for_spec, make_image_loader
-from models.multi_input import MultiInputNet, BernoulliLoss
+from loading.datasets import CustomLabelEncoder
+from loading.loaders import make_bag_loader, \
+    SetSpec, get_data_for_spec, make_image_loader, get_classes
+from models.multi_input import MultiInputNet, cnn_constructors
 import os
 import socket
 
 import torch
-from torch import nn, optim
+from torch import optim
 
-from ignite.engine import Events, create_supervised_trainer, create_supervised_evaluator, Engine
-from ignite.metrics import Accuracy, Loss, Precision, Recall, MeanAbsoluteError
-from ignite.contrib.handlers import ProgressBar, TensorboardLogger
-from ignite.handlers import ModelCheckpoint, global_step_from_engine
+from ignite.engine import Events, create_supervised_trainer, create_supervised_evaluator
+from ignite.metrics import Accuracy, Loss, Precision, Recall, MeanAbsoluteError, MetricsLambda, ConfusionMatrix
+from ignite.contrib.handlers import ProgressBar
+from ignite.handlers import global_step_from_engine
 import numpy as np
+from sklearn.dummy import DummyClassifier, DummyRegressor
 
 # import logging
-from ignite.contrib.handlers.neptune_logger import NeptuneLogger, OutputHandler
+from ignite.contrib.handlers.neptune_logger import NeptuneLogger, OutputHandler, WeightsScalarHandler, \
+    GradsScalarHandler
 
-from models.premade import make_resnet_18
-from utils.ignite_utils import PositiveShare, Variance, Average
+from utils.ignite_utils import PositiveShare, Variance, Average, binarize_softmax, binarize_sigmoid
 from utils.tokens import NEPTUNE_API_TOKEN
 
 y_epoch = []
 ypred_epoch = []
 losses = []
-
-
-def binarize_sigmoid(y_pred):
-    # the sigmoid is not part of the model
-    y_sig = nn.Sigmoid()(y_pred)
-    return torch.ge(y_sig, 0.5).int()
-
-
-# if we have an FC as the last layer
-def binarize_softmax(y_pred):
-    sm = nn.Softmax(dim=1)(y_pred)
-    _, i = torch.max(sm, dim=1)
-    return i
-
-
-def binarize_output(output):
-    y_pred, y = output['y_pred'], output['y']
-    y_pred = binarize_sigmoid(y_pred)
-    return y_pred, y
 
 
 def fix_seed(seed):
@@ -85,26 +69,35 @@ def train_model(config):
     else:
         normalizer_name = 'ESAOTE_6100'
 
+    # image level vs bag level
+    problem_type = config.get('problem_type', 'bag')
+
     backend = config.get('backend', 'resnet-18')
     mil_pooling = config.get('mil_pooling', 'attention')
-    classifier = config.get('classifier', 'fc')
+
+    # TODO allow more options here
+    fc_hidden_layers = config.get('fc_hidden_layers', True)
+    fc_use_bn = config.get('fc_use_bn', True)
     mil_mode = config.get('mil_mode', 'embedding')
 
     attribute = config.get('prediction_target', 'Age')
 
     # for now hard code the type of problem based on the attribute
-    problems = {'Sex': 'binary_classification', 'Age': 'regression', 'BMI': 'regression'}
+    problems = {'Sex': 'binary', 'Age': 'regression', 'BMI': 'regression',
+                'Muscle': 'multi', 'Class': 'multi'}
     if attribute not in problems:
         raise ValueError(f'Unknown attribute {attribute}')
-    is_classification = (problems[attribute] == 'binary_classification')
-
+    is_classification = (problems[attribute] == 'multi' or (problems[attribute] == 'binary'))
+    is_multi = (problems[attribute] == 'multi')
     # TRAINING ASPECTS
     batch_size = config.get('batch_size', 4)
+    # more than two bags per batch are likely to overwhelm memory
+    if backend_mode != 'extract_only' and problem_type == 'bag' and batch_size > 2:
+        print(f'Limiting batch size for non-extractive training.')
+        batch_size = 2
 
-    # if backend_mode != 'extract_only' and batch_size > 2:
-    #     print(f'Limiting batch size for non-extractive training.')
-    #     batch_size = 2
-
+    # whether to crop images to ImageNet size (i.e. 224 * 224)
+    limit_image_size = config.get('limit_image_size', True)
     lr = config.get('lr', 0.001)
     n_epochs = config.get('n_epochs', 20)
 
@@ -117,22 +110,27 @@ def train_model(config):
     # CONFIG ASPECTS
     use_cuda = config.get('use_cuda', True) & torch.cuda.is_available()
 
-    # whether a separate pass over the entire dataset should be done to log training set performance
-    # as this incurs overhead, it can be turned off, then the results computed after each batch during the epoch
-    # will be used instead
-    log_training_metrics_clean = False
-    project_name = 'createrandom/mus-' + attribute
-    npt_logger = NeptuneLogger(api_token=NEPTUNE_API_TOKEN,
-                               project_name=project_name,
-                               name='multi_input', params=config, offline_mode=True)
-
+    # change logging and data location based on machine
     current_host = socket.gethostname()
+    offline_mode = False
     if current_host == 'pop-os':
         mnt_path = '/mnt/chansey/'
+        offline_mode = True
     else:
         mnt_path = '/mnt/netcache/diag/'
 
     print(f'Using mount_path: {mnt_path}')
+
+    # whether a separate pass over the entire dataset should be done to log training set performance
+    # as this incurs overhead, it can be turned off, then the results computed after each batch during the epoch
+    # will be used instead
+    log_training_metrics_clean = False
+    log_grads = False
+    log_weights = False
+    project_name = 'createrandom/mus-base'
+    npt_logger = NeptuneLogger(api_token=NEPTUNE_API_TOKEN, project_name=project_name,
+                               tags=[attribute, problem_type],
+                               name='multi_input', params=config, offline_mode=offline_mode)
 
     # paths to the different datasets
     umc_data_path = os.path.join(mnt_path, 'klaus/data/devices/')
@@ -167,38 +165,108 @@ def train_model(config):
 
     set_loaders = {}
 
+    label_encoder = None
+    train_classes = None
+
+    muscles_to_use = ['Biceps brachii', 'Tibialis anterior', 'Gastrocnemius medial head', 'Flexor carpi radialis',
+                      'Vastus lateralis']
+
     for set_name, set_spec_list in desired_set_specs.items():
 
         loaders = []
         for set_spec in set_spec_list:
-            data = get_data_for_spec(set_spec, loader_type='image',attribute=attribute)
-            use_pseudopatient_locally = (set_name != 'val') & use_pseudopatients
-            img_path = set_spec.img_root_path
-            # loader = make_bag_loader(data, img_path, use_one_channel, normalizer_name,
-            #                          attribute, batch_size, set_spec.device, use_pseudopatients=use_pseudopatient_locally,
-            #                          is_classification=is_classification, pin_memory=use_cuda)
+            print(set_spec)
+            # pass the classes in to ensure that only those are present in all the sets
+            data = get_data_for_spec(set_spec, loader_type=problem_type, attribute=attribute,
+                                     class_values=train_classes,
+                                     muscles_to_use=muscles_to_use)
+            print(f'Loaded {len(data)} elements.')
 
-            loader = make_image_loader(data, img_path, use_one_channel, normalizer_name,
-                                     attribute, batch_size, set_spec.device,
-                                     is_classification=is_classification, pin_memory=use_cuda)
+            # if classification and this is the train set, we want to fit the label encoder on this
+            if is_classification & (set_name == 'source_train'):
+                train_classes = get_classes(data, attribute)
+                print(train_classes)
+                label_encoder = CustomLabelEncoder(train_classes, one_hot_encode=False)
+            print(get_classes(data, attribute))
+            img_path = set_spec.img_root_path
+            # decide which type of loader we need here
+            if problem_type == 'bag':
+                use_pseudopatient_locally = (set_name != 'val') & use_pseudopatients
+                loader = make_bag_loader(data, img_path, use_one_channel, normalizer_name,
+                                         attribute, batch_size, set_spec.device, limit_image_size=limit_image_size,
+                                         use_pseudopatients=use_pseudopatient_locally,
+                                         label_encoder=label_encoder, pin_memory=use_cuda)
+            elif problem_type == 'image':
+                loader = make_image_loader(data, img_path, use_one_channel, normalizer_name,
+                                           attribute, batch_size, set_spec.device, limit_image_size=limit_image_size,
+                                           label_encoder=label_encoder, pin_memory=use_cuda, is_multi=is_multi)
+            else:
+                raise ValueError(f'Unknown problem type {problem_type}')
 
             loaders.append(loader)
 
         set_loaders[set_name] = loaders
 
-    # model = MultiInputNet(backend=backend, mil_pooling=mil_pooling,
-    #                       classifier=classifier, mode=mil_mode, backend_kwargs=backend_kwargs)
+    # output dimensionality of the network
+    if train_classes and (len(train_classes) > 2):
+        num_classes = len(train_classes)
+    # regression or binary classification with sigmoid
+    else:
+        num_classes = 1
 
-    model = make_resnet_18(num_classes=1, pretrained=pretrained, in_channels=in_channels,
-                           feature_extraction=feature_extraction)
+    # obtain baseline performance estimates
+
+    print('Baseline scores')
+    train_labels = set_loaders['source_train'][0].dataset.get_all_labels()
+    if is_classification:
+        d = DummyClassifier(strategy='most_frequent')
+        scorer = accuracy_score
+    else:
+        d = DummyRegressor(strategy='mean')
+        scorer = mean_absolute_error
+    d.fit([0] * len(train_labels), train_labels)
+    train_preds = d.predict([0] * len(train_labels))
+    score = scorer(train_labels, train_preds)
+    print(score)
+
+    for val_loader in set_loaders['val']:
+        val_labels = val_loader.dataset.get_all_labels()
+        val_preds = d.predict([0] * len(val_labels))
+        score = scorer(val_labels, val_preds)
+        print(score)
+
+    # decide which type of model we want to train
+    if problem_type == 'bag':
+        model = MultiInputNet(backend=backend, mil_pooling=mil_pooling,
+                              mode=mil_mode, out_dim=num_classes,
+                              fc_hidden_layers=fc_hidden_layers, fc_use_bn=fc_use_bn,
+                              backend_kwargs=backend_kwargs)
+
+        # can specify different learning rates for each component!
+        # optimizer = optim.Adam([{'params': model.backend.parameters(), 'lr': 0},
+        #                         {'params': model.classifier.parameters(), 'lr': lr}], lr)
+
+        optimizer = optim.Adam(model.parameters(), lr)
+
+    elif problem_type == 'image':
+        # get the right cnn
+        backend_func = cnn_constructors[backend]
+        # add the output dim
+        backend_kwargs['num_classes'] = num_classes
+        model = backend_func(**backend_kwargs)
+        # train the whole backend with the same lr
+        optimizer = optim.Adam(model.parameters(), lr)
+    else:
+        raise ValueError(f'Unknown problem type {problem_type}')
+    print(f'Using {model}')
 
     if is_classification:
-        criterion = BCEWithLogitsLoss()  # BernoulliLoss
+        if num_classes == 1:
+            criterion = BCEWithLogitsLoss()  # BernoulliLoss
+        else:
+            criterion = CrossEntropyLoss()
     else:
         criterion = MSELoss()
-
-    # todo investigate / tune
-    optimizer = optim.Adam(model.parameters(), lr)
 
     device = torch.device("cuda:0" if use_cuda else "cpu")
     # needs to be manually enforced to work on the cluster
@@ -219,17 +287,28 @@ def train_model(config):
     # always log the loss
     metrics = {'loss': Loss(criterion, output_transform=lambda x: (x['y_pred'], x['y']))}
 
-    if is_classification:
-        # TODO adapt for non-binary case
-        metrics_to_add = {'accuracy': Accuracy(output_transform=binarize_output),
-                          'p': Precision(output_transform=binarize_output),
-                          'r': Recall(output_transform=binarize_output),
-                          'pos_share': PositiveShare(output_transform=binarize_output)
+    # binary cases
+    if is_classification & (num_classes == 1):
+        metrics_to_add = {'accuracy': Accuracy(output_transform=binarize_sigmoid),
+                          'p': Precision(output_transform=binarize_sigmoid),
+                          'r': Recall(output_transform=binarize_sigmoid),
+                          'pos_share': PositiveShare(output_transform=binarize_sigmoid)
+                          }
+    # non-binary case
+    elif is_classification:
+        p = Precision(output_transform=binarize_softmax, average=False)
+        r = Recall(output_transform=binarize_softmax, average=False)
+        F1 = p * r * 2 / (p + r + 1e-20)
+        F1 = MetricsLambda(lambda t: torch.mean(t).item(), F1)
+
+        metrics_to_add = {'accuracy': Accuracy(output_transform=binarize_softmax),
+                          'ap': Precision(output_transform=binarize_softmax, average=True),
+                          'ar': Recall(output_transform=binarize_softmax, average=True),
+                          'f1': F1,
+                          'cm': ConfusionMatrix(output_transform=binarize_softmax, num_classes=num_classes)
                           }
 
-
     else:
-
         metrics_to_add = {'mae': MeanAbsoluteError(),
                           'mean': Average(output_transform=lambda output: output['y_pred']),
                           'var': Variance(output_transform=lambda output: output['y_pred'])}
@@ -288,14 +367,14 @@ def train_model(config):
         val_evaluators.append(val_evaluator)
 
     # todo migrate this to tensorboard
-    # npt_logger.attach(trainer,
-    #                    log_handler=GradsScalarHandler(model),
-    #                    event_name=Events.EPOCH_COMPLETED)
-    #
-    # npt_logger.attach(trainer,
-    #                    log_handler=WeightsScalarHandler(model),
-    #                    event_name=Events.EPOCH_COMPLETED)
-    #
+    if log_grads:
+        npt_logger.attach(trainer,
+                          log_handler=GradsScalarHandler(model),
+                          event_name=Events.ITERATION_COMPLETED)
+    if log_weights:
+        npt_logger.attach(trainer,
+                          log_handler=WeightsScalarHandler(model),
+                          event_name=Events.ITERATION_COMPLETED)
 
     pbar = ProgressBar()
     pbar.attach(trainer)
@@ -327,9 +406,9 @@ def train_model(config):
 
 if __name__ == '__main__':
     # TODO read out from argparse
-    config = {'prediction_target': 'Age', 'backend_mode': 'scratch',
-              'backend': 'resnet-18', 'mil_pooling': 'mean', 'classifier': 'fc',
-              'mil_mode': 'embedding', 'batch_size': 8, 'lr': 0.1, 'n_epochs': 5,
-              'use_pseudopatients': False}
+    config = {'problem_type': 'bag', 'prediction_target': 'Sex', 'backend_mode': 'finetune',
+              'backend': 'resnet-18', 'mil_pooling': 'mean',
+              'mil_mode': 'embedding', 'batch_size': 2, 'lr': 0.0269311, 'n_epochs': 5,
+              'use_pseudopatients': False, 'fc_hidden_layers': True, 'fc_use_bn': True}
 
     train_model(config)
