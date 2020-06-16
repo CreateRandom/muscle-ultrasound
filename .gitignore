@@ -2,3 +2,5 @@
 /venv/
 /.idea/
 /data/
+/utils/stratify.py
+/docker
