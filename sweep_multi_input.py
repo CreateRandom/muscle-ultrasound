@@ -18,7 +18,7 @@ if __name__ == '__main__':
     base_config = {'problem_type': 'bag','prediction_target': 'Sex', 'backend_mode': 'extract_only',
               'backend': 'resnet-18', 'mil_pooling': 'mean',
               'mil_mode': 'embedding', 'batch_size': 4, 'lr': 0.1, 'n_epochs': 5,
-              'use_pseudopatients': False, 'data_source': 'umc', 'fc_use_bn': True, 'fc_hidden_layers': True}
+              'use_pseudopatients': False, 'data_source': 'umc', 'fc_use_bn': True, 'fc_hidden_layers': 0}
 
 
     sweep_config = {

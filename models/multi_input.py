@@ -107,7 +107,7 @@ cnn_constructors = {'resnet-18': make_resnet_18, 'alexnet': make_alexnet}
 # for now, we will always assume binary classification, maybe later see how to expand this
 class MultiInputNet(nn.Module):
     def __init__(self, backend='alexnet', mil_pooling='attention', mode='embedding', out_dim=1,
-                 fc_hidden_layers=False, fc_use_bn=False,
+                 fc_hidden_layers=0, fc_use_bn=True,
                  backend_kwargs=None):
         super(MultiInputNet, self).__init__()
         self.backend_type = backend
@@ -122,10 +122,13 @@ class MultiInputNet(nn.Module):
         # allow for variation
         # hidden_dims, in_dim, out_dim, activation='relu', bn=True
         # add a hidden dimension with half the size of the backend output
-        if fc_hidden_layers:
-            self.hidden_dims = [int(np.ceil(self.backend_out_dim / 2))]
-        else:
-            self.hidden_dims = []
+        self.hidden_dims = []
+        dim = self.backend_out_dim
+        for ind in range(fc_hidden_layers):
+            dim = int(np.ceil(dim / 2))
+            if dim > 1:
+                self.hidden_dims.append(dim)
+        print(f'Using hidden dims {self.hidden_dims}')
         self.classifier = self.make_classifier(hidden_dims=self.hidden_dims, in_dim=self.backend_out_dim,
                                                out_dim=self.out_dim, activation='leaky_relu',bn=fc_use_bn)
 

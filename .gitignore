@@ -4,3 +4,5 @@
 /data/
 /utils/stratify.py
 /docker
+/.ipynb_checkpoints/
+/checkpoints/

@@ -75,8 +75,7 @@ def train_model(config):
     backend = config.get('backend', 'resnet-18')
     mil_pooling = config.get('mil_pooling', 'attention')
 
-    # TODO allow more options here
-    fc_hidden_layers = config.get('fc_hidden_layers', True)
+    fc_hidden_layers = config.get('fc_hidden_layers', 0)
     fc_use_bn = config.get('fc_use_bn', True)
     mil_mode = config.get('mil_mode', 'embedding')
 
@@ -409,6 +408,6 @@ if __name__ == '__main__':
     config = {'problem_type': 'bag', 'prediction_target': 'Sex', 'backend_mode': 'finetune',
               'backend': 'resnet-18', 'mil_pooling': 'mean',
               'mil_mode': 'embedding', 'batch_size': 2, 'lr': 0.0269311, 'n_epochs': 5,
-              'use_pseudopatients': False, 'fc_hidden_layers': True, 'fc_use_bn': True}
+              'use_pseudopatients': False, 'fc_hidden_layers': 0, 'fc_use_bn': True}
 
     train_model(config)
