@@ -78,22 +78,41 @@ class DefaultBackend(nn.Module):
         return x
 
 
-def make_default_backend(use_embedding, backend_kwargs):
+def make_default_backend(use_embedding, cutoff, backend_kwargs):
     out_dim = 1
     if use_embedding:
         out_dim = 500
 
     return DefaultBackend(out_dim), out_dim
 
-def make_resnet_backend(use_embedding, backend_kwargs):
-    out_dim = 1
-    backend = make_resnet_18(num_classes=1, **backend_kwargs)
+def make_resnet_backend(use_embedding, cutoff, backend_kwargs):
     if use_embedding:
-        backend.fc = nn.Identity()
-        out_dim = 512
+        # get the full resnet (including the readout layer)
+        backend = make_resnet_18(**backend_kwargs)
+        out_dim = 1000
+        if cutoff > 0:
+            backend.fc = nn.Identity()
+            out_dim = 512
+        if cutoff > 1:
+            # can set various layers to identity
+            backend.layer4 = nn.Identity()
+            out_dim = 256
+        if cutoff > 2:
+            backend.layer3 = nn.Identity()
+            out_dim = 128
+        if cutoff > 3:
+            backend.layer2 = nn.Identity()
+            out_dim = 64
+        if cutoff > 4:
+            backend.layer1 = nn.Identity()
+            out_dim = 64
+    else:
+        # make a resnet with the last fc layer for scoring
+        backend = make_resnet_18(num_classes=1, **backend_kwargs)
+        out_dim = 1
     return backend, out_dim
-
-def make_alex_backend(use_embedding, backend_kwargs):
+# todo add cutoff
+def make_alex_backend(use_embedding, cutoff, backend_kwargs):
     out_dim = 1
     backend = make_alexnet(num_classes=1, **backend_kwargs)
     if use_embedding:
@@ -107,7 +126,7 @@ cnn_constructors = {'resnet-18': make_resnet_18, 'alexnet': make_alexnet}
 # for now, we will always assume binary classification, maybe later see how to expand this
 class MultiInputNet(nn.Module):
     def __init__(self, backend='alexnet', mil_pooling='attention', mode='embedding', out_dim=1,
-                 fc_hidden_layers=0, fc_use_bn=True,
+                 fc_hidden_layers=0, fc_use_bn=True, backend_cutoff=0,
                  backend_kwargs=None):
         super(MultiInputNet, self).__init__()
         self.backend_type = backend
@@ -116,7 +135,7 @@ class MultiInputNet(nn.Module):
         self.out_dim = out_dim
         self.mil_pooling_type = mil_pooling
         # allows for multiple backends
-        self.backend, self.backend_out_dim = self.make_backend(backend, mode, self.backend_kwargs)
+        self.backend, self.backend_out_dim = self.make_backend(backend, mode, backend_cutoff, self.backend_kwargs)
         # allows for multiple pooling functions
         self.mil_pooling = self.make_mil_pooling(mil_pooling, self.backend_out_dim)
         # allow for variation
@@ -186,12 +205,12 @@ class MultiInputNet(nn.Module):
         return pooled
 
     @staticmethod
-    def make_backend(backend_name, mode, backend_kwargs):
+    def make_backend(backend_name, mode, backend_cutoff, backend_kwargs):
 
         # think about the best way to do this
         backend_func = backend_funcs[backend_name]
         use_embedding = (mode == 'embedding')
-        backend, out_dim = backend_func(use_embedding, backend_kwargs)
+        backend, out_dim = backend_func(use_embedding, backend_cutoff, backend_kwargs)
 
         if mode == 'embedding':
             backend = nn.Sequential(backend, nn.ReLU())

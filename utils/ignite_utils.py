@@ -1,4 +1,6 @@
 from collections import Counter
+from functools import reduce
+
 import numpy as np
 from typing import Any, Callable, Optional, Union
 
@@ -6,6 +8,10 @@ import torch
 from ignite.metrics import Metric
 from torch import nn
 
+def pytorch_count_params(model):
+  "count number trainable parameters in a pytorch model"
+  total_params = sum(reduce( lambda a, b: a*b, x.size()) for x in model.parameters())
+  return total_params
 
 class SimpleAccumulator(Metric):
     def __init__(self, output_transform: Callable = lambda x: x, device: Optional[Union[str, torch.device]] = None):

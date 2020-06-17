@@ -3,7 +3,7 @@ from torch import nn
 
 import torchvision.models as models
 
-def make_resnet_18(num_classes, pretrained=True, in_channels=3, feature_extraction=False):
+def make_resnet_18(num_classes=None, pretrained=True, in_channels=3, feature_extraction=False):
 
     has_three_channels = (in_channels == 3)
     if pretrained and not has_three_channels:
@@ -26,11 +26,12 @@ def make_resnet_18(num_classes, pretrained=True, in_channels=3, feature_extracti
                                 bias=False)
 
     # reset final layer for desired classification
-    model.fc = nn.Linear(512, num_classes)
+    if num_classes:
+        model.fc = nn.Linear(512, num_classes)
 
     return model
 
-def make_alexnet(num_classes, pretrained=True, in_channels=3, feature_extraction=False):
+def make_alexnet(num_classes=None, pretrained=True, in_channels=3, feature_extraction=False):
 
     has_three_channels = (in_channels == 3)
     if pretrained and not has_three_channels:
@@ -50,7 +51,8 @@ def make_alexnet(num_classes, pretrained=True, in_channels=3, feature_extraction
     if not has_three_channels:
         model.features[0] = nn.Conv2d(in_channels, 64, kernel_size=11, stride=4, padding=2)
 
-    # reset final layer for desired classification
-    model.classifier[6] = nn.Linear(in_features=4096, out_features=num_classes, bias=True)
+    if num_classes:
+        # reset final layer for desired classification
+        model.classifier[6] = nn.Linear(in_features=4096, out_features=num_classes, bias=True)
 
     return model

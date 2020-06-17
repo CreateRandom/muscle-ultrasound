@@ -24,7 +24,8 @@ from sklearn.dummy import DummyClassifier, DummyRegressor
 from ignite.contrib.handlers.neptune_logger import NeptuneLogger, OutputHandler, WeightsScalarHandler, \
     GradsScalarHandler
 
-from utils.ignite_utils import PositiveShare, Variance, Average, binarize_softmax, binarize_sigmoid
+from utils.ignite_utils import PositiveShare, Variance, Average, binarize_softmax, binarize_sigmoid, \
+    pytorch_count_params
 from utils.tokens import NEPTUNE_API_TOKEN
 
 y_epoch = []
@@ -77,6 +78,8 @@ def train_model(config):
 
     fc_hidden_layers = config.get('fc_hidden_layers', 0)
     fc_use_bn = config.get('fc_use_bn', True)
+    # how many layers of the backend to chop of from the bottom
+    backend_cutoff = config.get('backend_cutoff', 0)
     mil_mode = config.get('mil_mode', 'embedding')
 
     attribute = config.get('prediction_target', 'Age')
@@ -91,13 +94,16 @@ def train_model(config):
     # TRAINING ASPECTS
     batch_size = config.get('batch_size', 4)
     # more than two bags per batch are likely to overwhelm memory
-    if backend_mode != 'extract_only' and problem_type == 'bag' and batch_size > 2:
-        print(f'Limiting batch size for non-extractive training.')
-        batch_size = 2
+    # if backend_mode != 'extract_only' and problem_type == 'bag' and batch_size > 2:
+    #     print(f'Limiting batch size for non-extractive training.')
+    #     batch_size = 2
 
     # whether to crop images to ImageNet size (i.e. 224 * 224)
     limit_image_size = config.get('limit_image_size', True)
     lr = config.get('lr', 0.001)
+    # separate lr for the backend can be specified, defaults to normal LR
+    backend_lr = config.get('backend_lr', lr)
+
     n_epochs = config.get('n_epochs', 20)
 
     in_channels = 1 if use_one_channel else 3
@@ -126,10 +132,7 @@ def train_model(config):
     log_training_metrics_clean = False
     log_grads = False
     log_weights = False
-    project_name = 'createrandom/mus-base'
-    npt_logger = NeptuneLogger(api_token=NEPTUNE_API_TOKEN, project_name=project_name,
-                               tags=[attribute, problem_type],
-                               name='multi_input', params=config, offline_mode=offline_mode)
+    project_name = 'createrandom/muscle-ultrasound'
 
     # paths to the different datasets
     umc_data_path = os.path.join(mnt_path, 'klaus/data/devices/')
@@ -159,8 +162,8 @@ def train_model(config):
     # 'target_train': SetSpec('Philips_iU22', 'umc', 'train', umc_data_path)
     desired_set_specs = {'source_train': [SetSpec('ESAOTE_6100', 'umc', 'train', umc_data_path, umc_img_root)],
                          'val': [SetSpec('ESAOTE_6100', 'umc', 'val', umc_data_path, umc_img_root),
-                                 SetSpec('Philips_iU22', 'umc', 'val', umc_data_path, umc_img_root),
-                                 SetSpec('GE_Logiq_E', 'jhu', 'im_muscle_chart', jhu_data_path, jhu_img_root)]}
+                                 SetSpec('Philips_iU22', 'umc', 'val', umc_data_path, umc_img_root)]}#,
+                                # SetSpec('GE_Logiq_E', 'jhu', 'im_muscle_chart', jhu_data_path, jhu_img_root)]}
 
     set_loaders = {}
 
@@ -239,13 +242,19 @@ def train_model(config):
         model = MultiInputNet(backend=backend, mil_pooling=mil_pooling,
                               mode=mil_mode, out_dim=num_classes,
                               fc_hidden_layers=fc_hidden_layers, fc_use_bn=fc_use_bn,
+                              backend_cutoff=backend_cutoff,
                               backend_kwargs=backend_kwargs)
 
-        # can specify different learning rates for each component!
-        # optimizer = optim.Adam([{'params': model.backend.parameters(), 'lr': 0},
-        #                         {'params': model.classifier.parameters(), 'lr': lr}], lr)
+        n_params_backend = pytorch_count_params(model.backend)
+        n_params_classifier = pytorch_count_params(model.classifier)
+        n_params_pooling = pytorch_count_params(model.mil_pooling)
+        config['n_params_classifier'] = n_params_classifier
+        config['n_params_pooling'] = n_params_pooling
 
-        optimizer = optim.Adam(model.parameters(), lr)
+        # can specify different learning rates for each component!
+        optimizer = optim.Adam([{'params': model.backend.parameters(), 'lr': backend_lr},
+                                {'params': model.classifier.parameters(), 'lr': lr}], lr)
+
 
     elif problem_type == 'image':
         # get the right cnn
@@ -253,11 +262,14 @@ def train_model(config):
         # add the output dim
         backend_kwargs['num_classes'] = num_classes
         model = backend_func(**backend_kwargs)
+        n_params_backend = pytorch_count_params(model)
         # train the whole backend with the same lr
-        optimizer = optim.Adam(model.parameters(), lr)
+        optimizer = optim.Adam(model.parameters(), backend_lr)
     else:
         raise ValueError(f'Unknown problem type {problem_type}')
     print(f'Using {model}')
+
+    config['n_params_backend'] = n_params_backend
 
     if is_classification:
         if num_classes == 1:
@@ -317,6 +329,11 @@ def train_model(config):
     # attach metrics to the trainer
     for set_spec, metric in metrics.items():
         metric.attach(trainer, set_spec)
+
+    npt_logger = NeptuneLogger(api_token=NEPTUNE_API_TOKEN, project_name=project_name,
+                               tags=[attribute, problem_type],
+                               name='multi_input', params=config, offline_mode=offline_mode)
+
 
     # there are two ways to log metrics during training
     # one can log them during the epoch, after each batch
@@ -405,9 +422,10 @@ def train_model(config):
 
 if __name__ == '__main__':
     # TODO read out from argparse
-    config = {'problem_type': 'bag', 'prediction_target': 'Sex', 'backend_mode': 'finetune',
+    config = {'problem_type': 'image', 'prediction_target': 'Muscle', 'backend_mode': 'finetune',
               'backend': 'resnet-18', 'mil_pooling': 'mean',
               'mil_mode': 'embedding', 'batch_size': 2, 'lr': 0.0269311, 'n_epochs': 5,
-              'use_pseudopatients': False, 'fc_hidden_layers': 0, 'fc_use_bn': True}
+              'use_pseudopatients': False, 'fc_hidden_layers': 3, 'fc_use_bn': True,
+              'backend_cutoff': 0}
 
     train_model(config)
