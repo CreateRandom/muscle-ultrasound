@@ -213,8 +213,6 @@ def train_model(config):
                                            attribute, batch_size, set_spec.device, limit_image_size=limit_image_size,
                                            label_encoder=label_encoder, pin_memory=use_cuda, is_multi=is_multi)
                 image_loaders.append(image_loader)
-            else:
-                raise ValueError(f'Unknown problem type {problem_type}')
 
 
         set_loaders['bag'][set_name] = bag_loaders
