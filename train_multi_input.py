@@ -6,7 +6,7 @@ from torch.nn import BCEWithLogitsLoss, MSELoss, CrossEntropyLoss
 from loading.datasets import CustomLabelEncoder
 from loading.loaders import make_bag_loader, \
     SetSpec, get_data_for_spec, make_image_loader, get_classes
-from models.multi_input import MultiInputNet, cnn_constructors
+from models.multi_input import MultiInputNet, cnn_constructors, MultiInputBaseline
 import os
 import socket
 
@@ -89,8 +89,9 @@ def train_model(config):
                 'Muscle': 'multi', 'Class': 'multi'}
     if attribute not in problems:
         raise ValueError(f'Unknown attribute {attribute}')
-    is_classification = (problems[attribute] == 'multi' or (problems[attribute] == 'binary'))
-    is_multi = (problems[attribute] == 'multi')
+    label_type = problems[attribute]
+    is_classification = (label_type == 'multi' or (label_type == 'binary'))
+    is_multi = (label_type == 'multi')
     # TRAINING ASPECTS
     batch_size = config.get('batch_size', 4)
     # more than two bags per batch are likely to overwhelm memory
@@ -166,7 +167,8 @@ def train_model(config):
                                 # SetSpec('GE_Logiq_E', 'jhu', 'im_muscle_chart', jhu_data_path, jhu_img_root)]}
 
     set_loaders = {}
-
+    set_loaders['bag'] = {}
+    set_loaders['image'] = {}
     label_encoder = None
     train_classes = None
 
@@ -175,39 +177,48 @@ def train_model(config):
 
     for set_name, set_spec_list in desired_set_specs.items():
 
-        loaders = []
+        bag_loaders = []
+        image_loaders = []
         for set_spec in set_spec_list:
             print(set_spec)
             # pass the classes in to ensure that only those are present in all the sets
-            data = get_data_for_spec(set_spec, loader_type=problem_type, attribute=attribute,
+            patients = get_data_for_spec(set_spec, loader_type='bag', attribute=attribute,
                                      class_values=train_classes,
                                      muscles_to_use=muscles_to_use)
-            print(f'Loaded {len(data)} elements.')
+           # patients = patients[0:10]
+            print(f'Loaded {len(patients)} elements.')
 
             # if classification and this is the train set, we want to fit the label encoder on this
             if is_classification & (set_name == 'source_train'):
-                train_classes = get_classes(data, attribute)
+                train_classes = get_classes(patients, attribute)
                 print(train_classes)
                 label_encoder = CustomLabelEncoder(train_classes, one_hot_encode=False)
-            print(get_classes(data, attribute))
+            print(get_classes(patients, attribute))
             img_path = set_spec.img_root_path
             # decide which type of loader we need here
-            if problem_type == 'bag':
-                use_pseudopatient_locally = (set_name != 'val') & use_pseudopatients
-                loader = make_bag_loader(data, img_path, use_one_channel, normalizer_name,
-                                         attribute, batch_size, set_spec.device, limit_image_size=limit_image_size,
-                                         use_pseudopatients=use_pseudopatient_locally,
-                                         label_encoder=label_encoder, pin_memory=use_cuda)
-            elif problem_type == 'image':
-                loader = make_image_loader(data, img_path, use_one_channel, normalizer_name,
+            # always make the bag loader
+            use_pseudopatient_locally = (set_name != 'val') & use_pseudopatients
+            loader = make_bag_loader(patients, img_path, use_one_channel, normalizer_name,
+                                     attribute, batch_size, set_spec.device, limit_image_size=limit_image_size,
+                                     use_pseudopatients=use_pseudopatient_locally,
+                                     label_encoder=label_encoder, pin_memory=use_cuda)
+            bag_loaders.append(loader)
+            # if desired, make the image loader
+            if problem_type == 'image':
+                images = get_data_for_spec(set_spec, loader_type='image', attribute=attribute,
+                                         class_values=train_classes,
+                                         muscles_to_use=muscles_to_use)
+              #  images = images[0:100]
+                image_loader = make_image_loader(images, img_path, use_one_channel, normalizer_name,
                                            attribute, batch_size, set_spec.device, limit_image_size=limit_image_size,
                                            label_encoder=label_encoder, pin_memory=use_cuda, is_multi=is_multi)
+                image_loaders.append(image_loader)
             else:
                 raise ValueError(f'Unknown problem type {problem_type}')
 
-            loaders.append(loader)
 
-        set_loaders[set_name] = loaders
+        set_loaders['bag'][set_name] = bag_loaders
+        set_loaders['image'][set_name] = image_loaders
 
     # output dimensionality of the network
     if train_classes and (len(train_classes) > 2):
@@ -219,7 +230,7 @@ def train_model(config):
     # obtain baseline performance estimates
 
     print('Baseline scores')
-    train_labels = set_loaders['source_train'][0].dataset.get_all_labels()
+    train_labels = set_loaders['bag']['source_train'][0].dataset.get_all_labels()
     if is_classification:
         d = DummyClassifier(strategy='most_frequent')
         scorer = accuracy_score
@@ -231,7 +242,7 @@ def train_model(config):
     score = scorer(train_labels, train_preds)
     print(score)
 
-    for val_loader in set_loaders['val']:
+    for val_loader in set_loaders['bag']['val']:
         val_labels = val_loader.dataset.get_all_labels()
         val_preds = d.predict([0] * len(val_labels))
         score = scorer(val_labels, val_preds)
@@ -255,7 +266,6 @@ def train_model(config):
         optimizer = optim.Adam([{'params': model.backend.parameters(), 'lr': backend_lr},
                                 {'params': model.classifier.parameters(), 'lr': lr}], lr)
 
-
     elif problem_type == 'image':
         # get the right cnn
         backend_func = cnn_constructors[backend]
@@ -265,6 +275,8 @@ def train_model(config):
         n_params_backend = pytorch_count_params(model)
         # train the whole backend with the same lr
         optimizer = optim.Adam(model.parameters(), backend_lr)
+        # TODO specify params
+        patient_eval = MultiInputBaseline(model, label_type=label_type)
     else:
         raise ValueError(f'Unknown problem type {problem_type}')
     print(f'Using {model}')
@@ -368,19 +380,43 @@ def train_model(config):
 
     # for each validation set, create an evaluator and attach it to the logger
     val_names = desired_set_specs['val']
-    val_loaders = set_loaders['val']
+    val_loaders = set_loaders[problem_type]['val']
     val_evaluators = []
 
     for set_spec, loader in zip(val_names, val_loaders):
+        eval_name = str(set_spec) + '_image' if problem_type == 'image' else str(set_spec)
         val_evaluator = create_supervised_evaluator(model, metrics=metrics, device=device,
                                                     output_transform=custom_output_transform_eval)
         # enable validation logging
         npt_logger.attach(val_evaluator,
-                          log_handler=OutputHandler(tag=str(set_spec),
+                          log_handler=OutputHandler(tag=eval_name,
                                                     metric_names=list(metrics.keys()),
                                                     global_step_transform=global_step_from_engine(trainer)),
                           event_name=Events.EPOCH_COMPLETED)
         val_evaluators.append(val_evaluator)
+
+    # add patient level baseline evaluators for the image level
+    if problem_type == 'image':
+        val_loaders_bag = set_loaders['bag']['val']
+        val_evaluators_bag = []
+        for set_spec, loader in zip(val_names, val_loaders_bag):
+            # TODO make sure we use the correct metrics here
+
+            metrics_to_add = {'accuracy': Accuracy(),
+                              'p': Precision(),
+                              'r': Recall(),
+                              'pos_share': PositiveShare()
+                              }
+
+            val_evaluator = create_supervised_evaluator(patient_eval, metrics=metrics_to_add, device=device,
+                                                        output_transform=custom_output_transform_eval)
+            # enable validation logging
+            npt_logger.attach(val_evaluator,
+                              log_handler=OutputHandler(tag=str(set_spec),
+                                                        metric_names=list(metrics.keys()),
+                                                        global_step_transform=global_step_from_engine(trainer)),
+                              event_name=Events.EPOCH_COMPLETED)
+            val_evaluators_bag.append(val_evaluator)
 
     # todo migrate this to tensorboard
     if log_grads:
@@ -412,9 +448,16 @@ def train_model(config):
             val_evaluator.run(val_loader)
             print(trainer.state.epoch, val_evaluator.state.metrics)
 
+        # run the patient level baseline
+        if problem_type == 'image':
+            for val_evaluator, val_loader in zip(val_evaluators_bag, val_loaders_bag):
+                val_evaluator.run(val_loader)
+                print(trainer.state.epoch, val_evaluator.state.metrics)
+
         #  tune.track.log(iter=evaluator.state.epoch, mean_accuracy=metrics['accuracy'])
 
-    train_loader = set_loaders['source_train'][0]
+    # get the appropriate loader
+    train_loader = set_loaders[problem_type]['source_train'][0]
     trainer.run(train_loader, max_epochs=n_epochs)
 
     npt_logger.close()
@@ -422,7 +465,7 @@ def train_model(config):
 
 if __name__ == '__main__':
     # TODO read out from argparse
-    config = {'problem_type': 'image', 'prediction_target': 'Muscle', 'backend_mode': 'finetune',
+    config = {'problem_type': 'image', 'prediction_target': 'Sex', 'backend_mode': 'finetune',
               'backend': 'resnet-18', 'mil_pooling': 'mean',
               'mil_mode': 'embedding', 'batch_size': 2, 'lr': 0.0269311, 'n_epochs': 5,
               'use_pseudopatients': False, 'fc_hidden_layers': 3, 'fc_use_bn': True,

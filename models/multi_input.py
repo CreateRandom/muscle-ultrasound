@@ -6,6 +6,7 @@ from torch import nn
 import numpy as np
 from models.mil_pooling import MaxMIL, AttentionMIL, AverageMIL, GatedAttentionMIL
 from models.premade import make_resnet_18, make_alexnet
+from utils.ignite_utils import _binarize_sigmoid, _binarize_softmax
 
 
 class MultiInputAlexNet(nn.Module):
@@ -120,6 +121,47 @@ def make_alex_backend(use_embedding, cutoff, backend_kwargs):
         out_dim = 4096
     return backend, out_dim
 
+class MultiInputBaseline(nn.Module):
+    def __init__(self, image_level_classifier, label_type):
+        super(MultiInputBaseline, self).__init__()
+        self.image_level_classifier = image_level_classifier
+        # use this only for predictions
+        # TODO make sure this doesn't mess with the gradient
+        # self.image_level_classifier.eval()
+
+        self.mode = label_type
+        if label_type == 'regression':
+            self.out_transform = nn.Identity()
+            self.aggregate = torch.mean
+        elif label_type == 'binary':
+            self.out_transform = _binarize_sigmoid
+            self.aggregate = lambda x: torch.mode(x,dim=0)[0]
+        elif label_type == 'multi':
+            self.out_transform = _binarize_softmax
+            self.aggregate = lambda x: torch.mode(x,dim=0)[0]
+        else:
+            raise ValueError(f'Unrecognized mode {label_type}')
+
+    def forward(self, x):
+        # img_rep: n_total_images * channels * height * width
+        # n_images_per_bag: how to allocate images to bags
+        img_rep, n_images_per_bag = x
+        n_images_per_bag = tuple(n_images_per_bag.cpu().numpy())
+
+        # get the predictions for all images at the same time
+        preds = self.image_level_classifier(img_rep)
+
+        # split by patient
+        pwise_preds = torch.split(preds, n_images_per_bag)
+        final_preds = []
+        for preds in pwise_preds:
+            # perform the output transform to get labels
+            transformed_preds = self.out_transform(preds)
+            final_pred = self.aggregate(transformed_preds)
+            final_preds.append(final_pred)
+
+        final_preds = torch.stack(final_preds)
+        return final_preds
 
 backend_funcs = {'resnet-18': make_resnet_backend, 'default': make_default_backend, 'alexnet': make_alex_backend}
 cnn_constructors = {'resnet-18': make_resnet_18, 'alexnet': make_alexnet}

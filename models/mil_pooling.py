@@ -36,6 +36,7 @@ class AttentionMIL(nn.Module):
         a = self.tanh(a)
         a = self.out_layer(a)
         a = torch.transpose(a, 1, 0)
+        # TODO possibly make this softmax layer optional?
         a = F.softmax(a, dim=1)
         x = torch.mm(a, x)
         return x
@@ -64,6 +65,7 @@ class GatedAttentionMIL(nn.Module):
         a_u = self.attention_U(x)  #
         a = self.attention_weights(a_v * a_u)  # element wise multiplication # NxK
         a = torch.transpose(a, 1, 0)  # KxN
+        # TODO possibly make this softmax layer optional?
         a = F.softmax(a, dim=1)
         x = torch.mm(a, x)
         return x
