@@ -3,16 +3,20 @@ import random
 import ray
 from ray import tune
 from ray.tune import sample_from
-from copy import deepcopy
-
 from train_multi_input import train_model
 
-if __name__ == '__main__':
+def run_rq1():
     # see here https://github.com/ray-project/ray/issues/7084
     ray.init(webui_host='127.0.0.1')
 
     base_config = {'prediction_target': 'Sex', 'backend_mode': 'finetune',
               'backend': 'resnet-18', 'n_epochs': 10, 'neptune_project': 'createrandom/MUS-RQ1'}
+
+    esoate_train = {'source_train': 'ESAOTE_6100_train',
+                         'val': ['Philips_iU22_val', 'ESAOTE_6100_val']}
+
+    base_config = {**base_config, **esoate_train}
+
 
     image_config = {'problem_type': 'image', 'batch_size': 64}
 

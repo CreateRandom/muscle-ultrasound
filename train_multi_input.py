@@ -138,7 +138,8 @@ def train_model(config):
     log_grads = False
     log_weights = False
     project_name = config.get('neptune_project','createrandom/muscle-ultrasound')
-    config.pop('neptune_project')
+    if 'neptune_project' in config:
+        config.pop('neptune_project')
     # paths to the different datasets
     umc_data_path = os.path.join(mnt_path, 'klaus/data/devices/')
     umc_img_root = os.path.join(mnt_path, 'klaus/total_patients/')
@@ -178,9 +179,11 @@ def train_model(config):
     set_loaders['image'] = {}
     label_encoder = None
     train_classes = None
-
-    muscles_to_use = ['Biceps brachii', 'Tibialis anterior', 'Gastrocnemius medial head', 'Flexor carpi radialis',
-                      'Vastus lateralis']
+    muscles_to_use = None
+    use_most_frequent_muscles = config.get('muscle_subset', False)
+    if use_most_frequent_muscles:
+        muscles_to_use = ['Biceps brachii', 'Tibialis anterior', 'Gastrocnemius medial head', 'Flexor carpi radialis',
+                          'Vastus lateralis']
 
     for set_name, set_spec_list in desired_set_specs.items():
 
