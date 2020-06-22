@@ -6,7 +6,6 @@ from ray.tune import sample_from
 
 from train_multi_input import train_model
 
-from torchvision.datasets import ImageNet
 if __name__ == '__main__':
     # see here https://github.com/ray-project/ray/issues/7084
     ray.init(webui_host='127.0.0.1')
@@ -15,20 +14,19 @@ if __name__ == '__main__':
 
     # sweep over lr, backend
 
-    base_config = {'problem_type': 'image','prediction_target': 'Sex', 'backend_mode': 'finetune',
-              'backend': 'resnet-18', 'mil_pooling': 'mean',
-              'mil_mode': 'embedding', 'batch_size': 64, 'lr': 0.1, 'n_epochs': 5,
-              'use_pseudopatients': True, 'data_source': 'umc', 'fc_use_bn': True, 'fc_hidden_layers': 0,
+    base_config = {'problem_type': 'bag','prediction_target': 'Sex', 'backend_mode': 'finetune',
+              'backend': 'resnet-18', 'mil_pooling': 'attention',
+              'mil_mode': 'embedding', 'batch_size': 8, 'lr': 0.1, 'n_epochs': 5,
+              'use_pseudopatients': True, 'data_source': 'umc', 'fc_use_bn': True, 'fc_hidden_layers': 2,
               'backend_cutoff': 1}
 
 
     sweep_config = {
         # lr for bag classifier and pooling
-     #   "lr": sample_from(lambda x: random.uniform(0.001, 0.1)),
+        "lr": sample_from(lambda x: random.uniform(0.001, 0.1)),
         # effective extract_only should be possible by setting a very small lr
         "backend_lr": sample_from(lambda x: random.uniform(0.001, 0.1)),
-        # how many layers at the bottom to chop off
-        "backend_mode": sample_from(lambda x: random.choice(['scratch', 'finetune'])),
+        "attention_mode": sample_from(lambda x: random.choice(['sigmoid', 'identity', 'softmax'])),
     }
 
     config = {**base_config, **sweep_config}

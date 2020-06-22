@@ -169,17 +169,21 @@ cnn_constructors = {'resnet-18': make_resnet_18, 'alexnet': make_alexnet}
 class MultiInputNet(nn.Module):
     def __init__(self, backend='alexnet', mil_pooling='attention', mode='embedding', out_dim=1,
                  fc_hidden_layers=0, fc_use_bn=True, backend_cutoff=0,
-                 backend_kwargs=None):
+                 backend_kwargs=None, pooling_kwargs=None):
         super(MultiInputNet, self).__init__()
         self.backend_type = backend
         self.mode = mode
+        default_pooling = {'mode': 'identity', 'D': 128}
+
+
+        self.pooling_kwargs = default_pooling if not pooling_kwargs else pooling_kwargs
         self.backend_kwargs = {} if not backend_kwargs else backend_kwargs
         self.out_dim = out_dim
         self.mil_pooling_type = mil_pooling
         # allows for multiple backends
         self.backend, self.backend_out_dim = self.make_backend(backend, mode, backend_cutoff, self.backend_kwargs)
         # allows for multiple pooling functions
-        self.mil_pooling = self.make_mil_pooling(mil_pooling, self.backend_out_dim)
+        self.mil_pooling = self.make_mil_pooling(mil_pooling, self.backend_out_dim, self.pooling_kwargs)
         # allow for variation
         # hidden_dims, in_dim, out_dim, activation='relu', bn=True
         # add a hidden dimension with half the size of the backend output
@@ -226,12 +230,16 @@ class MultiInputNet(nn.Module):
         # reshape back to original format
         # mil_inputs = all_mats_flat.reshape(n_patients, n_images_per_patient, self.backend_out_dim)
         pooled = []
+        attention_outputs = []
         # for elem in pwise_images:
         #     pooled.append(self.classifier(self.mil_pooling(elem)).squeeze())
         # pooled = torch.stack(pooled)
 
         for elem in pwise_images:
-            pooled.append(self.mil_pooling(elem).squeeze())
+            p, att = self.mil_pooling(elem)
+            pooled.append(p.squeeze())
+            if att is not None:
+                attention_outputs.append(att)
         pooled = torch.stack(pooled)
 
         # ensure batch first format
@@ -244,7 +252,7 @@ class MultiInputNet(nn.Module):
         if pooled.ndimension() == 1:
             pooled = pooled.unsqueeze(1)
 
-        return pooled
+        return pooled, attention_outputs
 
     @staticmethod
     def make_backend(backend_name, mode, backend_cutoff, backend_kwargs):
@@ -263,15 +271,15 @@ class MultiInputNet(nn.Module):
         return backend, out_dim
 
     @staticmethod
-    def make_mil_pooling(type, in_dim):
+    def make_mil_pooling(type, in_dim, pooling_kwargs=None):
         if type == 'max':
             return MaxMIL()
         elif type == 'mean':
             return AverageMIL()
         elif type == 'attention':
-            return AttentionMIL(in_dim, 128, 1)
+            return AttentionMIL(L=in_dim, K=1, **pooling_kwargs)
         elif type == 'gated_attention':
-            return GatedAttentionMIL(in_dim, 128, 1)
+            return GatedAttentionMIL(L=in_dim, K=1, **pooling_kwargs)
         else:
             raise ValueError(f'Invalid MIL type: {type}')
 

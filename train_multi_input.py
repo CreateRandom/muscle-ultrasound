@@ -6,6 +6,7 @@ from torch.nn import BCEWithLogitsLoss, MSELoss, CrossEntropyLoss
 from loading.datasets import CustomLabelEncoder
 from loading.loaders import make_bag_loader, \
     SetSpec, get_data_for_spec, make_image_loader, get_classes
+from loading.loading_utils import make_set_specs
 from models.multi_input import MultiInputNet, cnn_constructors, MultiInputBaseline
 import os
 import socket
@@ -25,7 +26,7 @@ from ignite.contrib.handlers.neptune_logger import NeptuneLogger, OutputHandler,
     GradsScalarHandler
 
 from utils.ignite_utils import PositiveShare, Variance, Average, binarize_softmax, binarize_sigmoid, \
-    pytorch_count_params
+    pytorch_count_params, create_custom_trainer, create_custom_evaluator, Minimum, Maximum
 from utils.tokens import NEPTUNE_API_TOKEN
 
 y_epoch = []
@@ -75,6 +76,9 @@ def train_model(config):
 
     backend = config.get('backend', 'resnet-18')
     mil_pooling = config.get('mil_pooling', 'attention')
+    attention_mode = config.get('attention_mode', 'identity')
+    attention_D = config.get('attention_D', 128)
+    pooling_kwargs = {'mode' : attention_mode, 'D': attention_D}
 
     fc_hidden_layers = config.get('fc_hidden_layers', 0)
     fc_use_bn = config.get('fc_use_bn', True)
@@ -133,38 +137,41 @@ def train_model(config):
     log_training_metrics_clean = False
     log_grads = False
     log_weights = False
-    project_name = 'createrandom/muscle-ultrasound'
-
+    project_name = config.get('neptune_project','createrandom/muscle-ultrasound')
+    config.pop('neptune_project')
     # paths to the different datasets
     umc_data_path = os.path.join(mnt_path, 'klaus/data/devices/')
     umc_img_root = os.path.join(mnt_path, 'klaus/total_patients/')
     jhu_data_path = os.path.join(mnt_path, 'klaus/myositis/')
     jhu_img_root = os.path.join(mnt_path, 'klaus/myositis/processed_imgs')
 
-    # for each device, we have a test, val and a test set
-    device_mapping = {'ESAOTE_6100': 'umc', 'GE_Logiq_E': 'jhu', 'Philips_iU22': 'umc'}
-    device_splits = {'ESAOTE_6100': ['train', 'val', 'test'], 'GE_Logiq_E': ['im_muscle_chart'],
-                     'Philips_iU22': ['train', 'val', 'test']}
-
-    label_paths = {'umc': umc_data_path, 'jhu': jhu_data_path}
-    img_root_paths = {'umc': umc_img_root, 'jhu': jhu_img_root}
-    set_specs = []
-    for device, dataset_type in device_mapping.items():
-        # get the splits
-        splits = device_splits[device]
-        label_path = label_paths[dataset_type]
-        img_root_path = img_root_paths[dataset_type]
-        for split in splits:
-            set_specs.append(SetSpec(device, dataset_type, split, label_path, img_root_path))
-
-    # the sets we need: supervised train, unsupervised train (potentially)
-    # any number of validation sets
+    # yields a mapping from names to set_specs
+    set_spec_dict = make_set_specs(umc_data_path, umc_img_root, jhu_data_path, jhu_img_root)
+    # this is always needed
+    source_train = config.get('source_train')
+    target_train = config.get('target_train', None)
+    val = config.get('val')
 
     # 'target_train': SetSpec('Philips_iU22', 'umc', 'train', umc_data_path)
-    desired_set_specs = {'source_train': [SetSpec('ESAOTE_6100', 'umc', 'train', umc_data_path, umc_img_root)],
-                         'val': [SetSpec('ESAOTE_6100', 'umc', 'val', umc_data_path, umc_img_root),
-                                 SetSpec('Philips_iU22', 'umc', 'val', umc_data_path, umc_img_root)]}#,
-                                # SetSpec('GE_Logiq_E', 'jhu', 'im_muscle_chart', jhu_data_path, jhu_img_root)]}
+    desired_set_specs = {'source_train': source_train, 'target_train' : target_train,
+                         'val': val} # 'GE_Logiq_E_im_muscle_chart']}
+
+    # resolve the set names to set_specs
+    resolved_set_specs = {}
+    for key in desired_set_specs.keys():
+        elem = desired_set_specs[key]
+        if not elem:
+            continue
+        if isinstance(elem,list):
+            new_elem = []
+            for name in elem:
+                spec = set_spec_dict[name]
+                new_elem.append(spec)
+        else:
+            new_elem = [set_spec_dict[elem]]
+        resolved_set_specs[key] = new_elem
+
+    desired_set_specs = resolved_set_specs
 
     set_loaders = {}
     set_loaders['bag'] = {}
@@ -249,6 +256,7 @@ def train_model(config):
     # decide which type of model we want to train
     if problem_type == 'bag':
         model = MultiInputNet(backend=backend, mil_pooling=mil_pooling,
+                              pooling_kwargs=pooling_kwargs,
                               mode=mil_mode, out_dim=num_classes,
                               fc_hidden_layers=fc_hidden_layers, fc_use_bn=fc_use_bn,
                               backend_cutoff=backend_cutoff,
@@ -296,24 +304,36 @@ def train_model(config):
     # this custom transform allows attaching metrics directly to the trainer
     # as y and y_pred can be read out from the output dict
     def custom_output_transform(x, y, y_pred, loss):
+        atts = y_pred['atts']
+        y_pred = y_pred['preds']
         return {
             "y": y,
             "y_pred": y_pred,
+            "atts": atts,
             "loss": loss.item()
         }
 
-    trainer = create_supervised_trainer(model, optimizer, criterion,
+    trainer = create_custom_trainer(model, optimizer, criterion,
                                         device=device, output_transform=custom_output_transform)
 
     # always log the loss
     metrics = {'loss': Loss(criterion, output_transform=lambda x: (x['y_pred'], x['y']))}
 
+    # logging attention distributions
+    log_attention = mil_pooling == 'attention'
+    if log_attention:
+        metrics_to_add = {'mean_att': Average(output_transform=lambda output: output['atts']),
+                          'var_att': Variance(output_transform=lambda output: output['atts']),
+                          'min_att': Minimum(output_transform=lambda output: output['atts']),
+                          'max_att': Maximum(output_transform=lambda output: output['atts'])}
+        metrics = {**metrics, **metrics_to_add}
     # binary cases
     if is_classification & (num_classes == 1):
         metrics_to_add = {'accuracy': Accuracy(output_transform=binarize_sigmoid),
                           'p': Precision(output_transform=binarize_sigmoid),
                           'r': Recall(output_transform=binarize_sigmoid),
-                          'pos_share': PositiveShare(output_transform=binarize_sigmoid)
+                          'pos_share': PositiveShare(output_transform=binarize_sigmoid),
+  #                        'best_accuracy': SimpleAggregate(Accuracy(), np.max, output_transform=binarize_sigmoid)
                           }
     # non-binary case
     elif is_classification:
@@ -356,18 +376,21 @@ def train_model(config):
     npt_logger.attach(trainer,
                       log_handler=OutputHandler(tag="training",
                                                 metric_names='all'),
-                      event_name=Events.EPOCH_COMPLETED)
+                      event_name=Events.ITERATION_COMPLETED)
 
     def custom_output_transform_eval(x, y, y_pred):
+        atts = y_pred['atts']
+        y_pred = y_pred['preds']
         return {
             "y": y,
             "y_pred": y_pred,
+            "atts": atts,
         }
 
     # only if desired incur the extra overhead
     if log_training_metrics_clean:
         # make a separate evaluator and attach to it instead (do a clean pass)
-        train_evaluator = create_supervised_evaluator(model, metrics=metrics, device=device,
+        train_evaluator = create_custom_evaluator(model, metrics=metrics, device=device,
                                                       output_transform=custom_output_transform_eval)
         # enable training logging
         npt_logger.attach(train_evaluator,
@@ -383,7 +406,7 @@ def train_model(config):
 
     for set_spec, loader in zip(val_names, val_loaders):
         eval_name = str(set_spec) + '_image' if problem_type == 'image' else str(set_spec)
-        val_evaluator = create_supervised_evaluator(model, metrics=metrics, device=device,
+        val_evaluator = create_custom_evaluator(model, metrics=metrics, device=device,
                                                     output_transform=custom_output_transform_eval)
         # enable validation logging
         npt_logger.attach(val_evaluator,
@@ -460,13 +483,17 @@ def train_model(config):
 
     npt_logger.close()
 
-
 if __name__ == '__main__':
     # TODO read out from argparse
-    config = {'problem_type': 'image', 'prediction_target': 'Sex', 'backend_mode': 'finetune',
-              'backend': 'resnet-18', 'mil_pooling': 'mean',
+    config = {'problem_type': 'bag', 'prediction_target': 'Sex', 'backend_mode': 'finetune',
+              'backend': 'resnet-18', 'mil_pooling': 'attention', 'attention_mode': 'sigmoid',
               'mil_mode': 'embedding', 'batch_size': 2, 'lr': 0.0269311, 'n_epochs': 5,
               'use_pseudopatients': False, 'fc_hidden_layers': 3, 'fc_use_bn': True,
               'backend_cutoff': 0}
+
+    only_philips = {'source_train': 'Philips_iU22_train',
+                         'val': 'Philips_iU22_val'}
+
+    config = {**config, **only_philips}
 
     train_model(config)
