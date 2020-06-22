@@ -385,11 +385,11 @@ def train_model(config):
     # or one can compute a clean pass after all the batches have been processed, iterating over them again
     # the latter is the standard practice in ignite examples, but incurs some considerable overhead
 
-    # attach directly to trainer (log results after each batch)
+    # attach directly to trainer (log results after each epoch)
     npt_logger.attach(trainer,
                       log_handler=OutputHandler(tag="training",
                                                 metric_names='all'),
-                      event_name=Events.ITERATION_COMPLETED)
+                      event_name=Events.EPOCH_COMPLETED)
 
     def custom_output_transform_eval(x, y, y_pred):
         if isinstance(y_pred, dict):
