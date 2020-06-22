@@ -75,7 +75,7 @@ def train_model(config):
     problem_type = config.get('problem_type', 'bag')
 
     backend = config.get('backend', 'resnet-18')
-    mil_pooling = config.get('mil_pooling', 'attention')
+    mil_pooling = config.get('mil_pooling', 'mean')
     attention_mode = config.get('attention_mode', 'identity')
     attention_D = config.get('attention_D', 128)
     pooling_kwargs = {'mode' : attention_mode, 'D': attention_D}
@@ -307,17 +307,27 @@ def train_model(config):
     # this custom transform allows attaching metrics directly to the trainer
     # as y and y_pred can be read out from the output dict
     def custom_output_transform(x, y, y_pred, loss):
-        atts = y_pred['atts']
-        y_pred = y_pred['preds']
+        if isinstance(y_pred,dict):
+            atts = y_pred['atts']
+            return {
+                "y": y,
+                "y_pred": y_pred['preds'],
+                "atts": atts,
+                "loss": loss.item()
+            }
+
         return {
             "y": y,
             "y_pred": y_pred,
-            "atts": atts,
             "loss": loss.item()
         }
 
-    trainer = create_custom_trainer(model, optimizer, criterion,
-                                        device=device, output_transform=custom_output_transform)
+    if problem_type == 'bag':
+        trainer = create_custom_trainer(model, optimizer, criterion,
+                                            device=device, output_transform=custom_output_transform)
+    else:
+        trainer = create_supervised_trainer(model, optimizer, criterion,
+                                            device=device, output_transform=custom_output_transform)
 
     # always log the loss
     metrics = {'loss': Loss(criterion, output_transform=lambda x: (x['y_pred'], x['y']))}
@@ -382,19 +392,27 @@ def train_model(config):
                       event_name=Events.ITERATION_COMPLETED)
 
     def custom_output_transform_eval(x, y, y_pred):
-        atts = y_pred['atts']
-        y_pred = y_pred['preds']
+        if isinstance(y_pred, dict):
+            atts = y_pred['atts']
+            return {
+                "y": y,
+                "y_pred": y_pred['preds'],
+                "atts": atts,
+            }
         return {
             "y": y,
             "y_pred": y_pred,
-            "atts": atts,
         }
 
     # only if desired incur the extra overhead
     if log_training_metrics_clean:
-        # make a separate evaluator and attach to it instead (do a clean pass)
-        train_evaluator = create_custom_evaluator(model, metrics=metrics, device=device,
-                                                      output_transform=custom_output_transform_eval)
+        if problem_type == 'bag':
+            # make a separate evaluator and attach to it instead (do a clean pass)
+            train_evaluator = create_custom_evaluator(model, metrics=metrics, device=device,
+                                                          output_transform=custom_output_transform_eval)
+        else:
+            train_evaluator = create_supervised_evaluator(model, metrics=metrics, device=device,
+                                                          output_transform=custom_output_transform_eval)
         # enable training logging
         npt_logger.attach(train_evaluator,
                           log_handler=OutputHandler(tag="training_clean",
@@ -409,8 +427,12 @@ def train_model(config):
 
     for set_spec, loader in zip(val_names, val_loaders):
         eval_name = str(set_spec) + '_image' if problem_type == 'image' else str(set_spec)
-        val_evaluator = create_custom_evaluator(model, metrics=metrics, device=device,
-                                                    output_transform=custom_output_transform_eval)
+        if problem_type == 'bag':
+            val_evaluator = create_custom_evaluator(model, metrics=metrics, device=device,
+                                                        output_transform=custom_output_transform_eval)
+        else:
+            val_evaluator = create_supervised_evaluator(model, metrics=metrics, device=device,
+                                                        output_transform=custom_output_transform_eval)
         # enable validation logging
         npt_logger.attach(val_evaluator,
                           log_handler=OutputHandler(tag=eval_name,
