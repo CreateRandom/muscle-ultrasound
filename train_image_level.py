@@ -244,6 +244,7 @@ def train_image_level(config):
     device = torch.device("cuda:0" if use_cuda else "cpu")
     # needs to be manually enforced to work on the cluster
     model.to(device)
+    patient_eval.to(device)
 
     # this custom transform allows attaching metrics directly to the trainer
     # as y and y_pred can be read out from the output dict
@@ -356,12 +357,12 @@ def train_image_level(config):
                           'r': Recall(),
                           'pos_share': PositiveShare()
                           }
-        #
+
         val_evaluator = create_supervised_evaluator(patient_eval, metrics=metrics_to_add, device=device,
                                                     output_transform=custom_output_transform_eval)
 
         # val_evaluator = create_image_to_bag_evaluator(model, metrics=metrics_to_add, device=device,
-        #                                             output_transform=custom_output_transform_eval)
+        #                                              output_transform=custom_output_transform_eval)
         # enable validation logging
         npt_logger.attach(val_evaluator,
                           log_handler=OutputHandler(tag=str(set_spec),
