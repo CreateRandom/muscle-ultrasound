@@ -115,7 +115,7 @@ def binarize_sigmoid(output):
     y_pred = _binarize_sigmoid(y_pred)
     return y_pred, y
 
-def create_custom_trainer(
+def create_bag_attention_trainer(
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
     loss_fn: Union[Callable, torch.nn.Module],
@@ -197,7 +197,7 @@ def flatten_attention_scores(attention_outputs):
         att_scores_flat = torch.cat(att_scores_flat)
     return att_scores_flat
 
-def create_custom_evaluator(
+def create_bag_attention_evaluator(
     model: torch.nn.Module,
     metrics: Optional[Dict[str, Metric]] = None,
     device: Optional[Union[str, torch.device]] = None,
@@ -249,6 +249,87 @@ def create_custom_evaluator(
             # flatten the scores
             att_scores_flat = flatten_attention_scores(attention_outputs)
             y_pred = {'preds': y_pred, 'atts': att_scores_flat}
+            return output_transform(x, y, y_pred)
+
+    evaluator = Engine(_inference)
+
+    for name, metric in metrics.items():
+        metric.attach(evaluator, name)
+
+    return evaluator
+
+def create_image_to_bag_evaluator(
+    model: torch.nn.Module,
+    metrics: Optional[Dict[str, Metric]] = None,
+    device: Optional[Union[str, torch.device]] = None,
+    non_blocking: bool = False,
+    prepare_batch: Callable = _prepare_batch,
+    output_transform: Callable = lambda x, y, y_pred: (y_pred, y),
+) -> Engine:
+    """
+    Factory function for creating an evaluator for supervised models.
+
+    Args:
+        model (`torch.nn.Module`): the model to train.
+        metrics (dict of str - :class:`~ignite.metrics.Metric`): a map of metric names to Metrics.
+        device (str, optional): device type specification (default: None).
+            Applies to batches after starting the engine. Model *will not* be moved.
+        non_blocking (bool, optional): if True and this copy is between CPU and GPU, the copy may occur asynchronously
+            with respect to the host. For other cases, this argument has no effect.
+        prepare_batch (callable, optional): function that receives `batch`, `device`, `non_blocking` and outputs
+            tuple of tensors `(batch_x, batch_y)`.
+        output_transform (callable, optional): function that receives 'x', 'y', 'y_pred' and returns value
+            to be assigned to engine's state.output after each iteration. Default is returning `(y_pred, y,)` which fits
+            output expected by metrics. If you change it you should use `output_transform` in metrics.
+
+    Note:
+        `engine.state.output` for this engine is defind by `output_transform` parameter and is
+        a tuple of `(batch_pred, batch_y)` by default.
+
+    .. warning::
+
+        The internal use of `device` has changed.
+        `device` will now *only* be used to move the input data to the correct device.
+        The `model` should be moved by the user before creating an optimizer.
+
+        For more information see:
+
+        * `PyTorch Documentation <https://pytorch.org/docs/stable/optim.html#constructing-it>`_
+        * `PyTorch's Explanation <https://github.com/pytorch/pytorch/issues/7844#issuecomment-503713840>`_
+
+    Returns:
+        Engine: an evaluator engine with supervised inference function.
+    """
+    metrics = metrics or {}
+
+    # todo adjust these dynamically based on the usage scenario
+    out_transform = _binarize_sigmoid
+    aggregate = lambda x: torch.mode(x, dim=0)[0]
+
+    def _aggregate_images_to_bag(bag_batch):
+        img_rep, n_images_per_bag = bag_batch
+        n_images_per_bag = tuple(n_images_per_bag.cpu().numpy())
+
+        # get the predictions for all images at the same time
+        preds = model(img_rep)
+
+        # split by patient
+        pwise_preds = torch.split(preds, n_images_per_bag)
+        final_preds = []
+        for preds in pwise_preds:
+            # perform the output transform to get labels
+            transformed_preds = out_transform(preds)
+            final_pred = aggregate(transformed_preds)
+            final_preds.append(final_pred)
+
+        y_pred = torch.stack(final_preds)
+        return y_pred
+
+    def _inference(engine: Engine, batch: Sequence[torch.Tensor]) -> Union[Any, Tuple[torch.Tensor]]:
+        model.eval()
+        with torch.no_grad():
+            x, y = prepare_batch(batch, device=device, non_blocking=non_blocking)
+            y_pred = _aggregate_images_to_bag(x)
             return output_transform(x, y, y_pred)
 
     evaluator = Engine(_inference)

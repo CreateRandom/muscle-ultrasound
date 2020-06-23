@@ -3,7 +3,9 @@ import random
 import ray
 from ray import tune
 from ray.tune import sample_from
-from train_multi_input import train_model
+
+from train_image_level import train_image_level
+from train_multi_input import train_multi_input
 
 def run_rq1():
     # see here https://github.com/ray-project/ray/issues/7084
@@ -18,7 +20,7 @@ def run_rq1():
     base_config = {**base_config, **esoate_train}
 
 
-    image_config = {'problem_type': 'image', 'batch_size': 64}
+    image_config = {'problem_type': 'image', 'batch_size': 32}
 
     image_config = {**base_config, **image_config}
 
@@ -40,14 +42,14 @@ def run_rq1():
     config = {**image_config, **image_sweep_config}
 
     num_samples = 24
-    tune.run(train_model,
-                        config=config,
-                        num_samples=num_samples,
-                        resources_per_trial={"gpu": 1, "cpu": 8})
+    tune.run(train_image_level,
+             config=config,
+             num_samples=num_samples,
+             resources_per_trial={"gpu": 1, "cpu": 8})
 
     config = {**bag_config, **bag_sweep_config}
 
-    tune.run(train_model,
-                        config=config,
-                        num_samples=num_samples,
-                        resources_per_trial={"gpu": 1, "cpu": 8})
+    tune.run(train_multi_input,
+             config=config,
+             num_samples=num_samples,
+             resources_per_trial={"gpu": 1, "cpu": 8})

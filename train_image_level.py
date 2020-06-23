@@ -1,13 +1,12 @@
-import random
-
 from sklearn.metrics import mean_absolute_error, accuracy_score
 from torch.nn import BCEWithLogitsLoss, MSELoss, CrossEntropyLoss
 
+from training_utils import problems, fix_seed
 from loading.datasets import CustomLabelEncoder
 from loading.loaders import make_bag_loader, \
-    SetSpec, get_data_for_spec, make_image_loader, get_classes
+    get_data_for_spec, make_image_loader, get_classes
 from loading.loading_utils import make_set_specs
-from models.multi_input import MultiInputNet, cnn_constructors, MultiInputBaseline
+from models.multi_input import cnn_constructors, MultiInputBaseline
 import os
 import socket
 
@@ -18,18 +17,18 @@ from ignite.engine import Events, create_supervised_trainer, create_supervised_e
 from ignite.metrics import Accuracy, Loss, Precision, Recall, MeanAbsoluteError, MetricsLambda, ConfusionMatrix
 from ignite.contrib.handlers import ProgressBar
 from ignite.handlers import global_step_from_engine
-import numpy as np
 from sklearn.dummy import DummyClassifier, DummyRegressor
-from training_utils import problems, fix_seed
+
 # import logging
 from ignite.contrib.handlers.neptune_logger import NeptuneLogger, OutputHandler, WeightsScalarHandler, \
     GradsScalarHandler
 
 from utils.ignite_utils import PositiveShare, Variance, Average, binarize_softmax, binarize_sigmoid, \
-    pytorch_count_params, create_bag_attention_trainer, create_bag_attention_evaluator, Minimum, Maximum
+    pytorch_count_params, create_image_to_bag_evaluator
 from utils.tokens import NEPTUNE_API_TOKEN
 
-def train_multi_input(config):
+
+def train_image_level(config):
     print(config)
     seed = config.get('seed', 42)
     fix_seed(seed)
@@ -61,16 +60,6 @@ def train_multi_input(config):
         normalizer_name = 'ESAOTE_6100'
 
     backend = config.get('backend', 'resnet-18')
-    mil_pooling = config.get('mil_pooling', 'mean')
-    attention_mode = config.get('attention_mode', 'identity')
-    attention_D = config.get('attention_D', 128)
-    pooling_kwargs = {'mode' : attention_mode, 'D': attention_D}
-
-    fc_hidden_layers = config.get('fc_hidden_layers', 0)
-    fc_use_bn = config.get('fc_use_bn', True)
-    # how many layers of the backend to chop of from the bottom
-    backend_cutoff = config.get('backend_cutoff', 0)
-    mil_mode = config.get('mil_mode', 'embedding')
 
     attribute = config.get('prediction_target', 'Age')
 
@@ -81,13 +70,11 @@ def train_multi_input(config):
     is_multi = (label_type == 'multi')
     # TRAINING ASPECTS
     batch_size = config.get('batch_size', 4)
-    # more than two bags per batch are likely to overwhelm memory
+    patient_batch_size = config.get('batch_size', 4)
 
     # whether to crop images to ImageNet size (i.e. 224 * 224)
     limit_image_size = config.get('limit_image_size', True)
     lr = config.get('lr', 0.001)
-    # separate lr for the backend can be specified, defaults to normal LR
-    backend_lr = config.get('backend_lr', lr)
 
     n_epochs = config.get('n_epochs', 20)
 
@@ -117,7 +104,7 @@ def train_multi_input(config):
     log_training_metrics_clean = False
     log_grads = False
     log_weights = False
-    project_name = config.get('neptune_project','createrandom/muscle-ultrasound')
+    project_name = config.get('neptune_project', 'createrandom/muscle-ultrasound')
     if 'neptune_project' in config:
         config.pop('neptune_project')
     # paths to the different datasets
@@ -134,8 +121,8 @@ def train_multi_input(config):
     val = config.get('val')
 
     # 'target_train': SetSpec('Philips_iU22', 'umc', 'train', umc_data_path)
-    desired_set_specs = {'source_train': source_train, 'target_train' : target_train,
-                         'val': val} # 'GE_Logiq_E_im_muscle_chart']}
+    desired_set_specs = {'source_train': source_train, 'target_train': target_train,
+                         'val': val}  # 'GE_Logiq_E_im_muscle_chart']}
 
     # resolve the set names to set_specs
     resolved_set_specs = {}
@@ -143,7 +130,7 @@ def train_multi_input(config):
         elem = desired_set_specs[key]
         if not elem:
             continue
-        if isinstance(elem,list):
+        if isinstance(elem, list):
             new_elem = []
             for name in elem:
                 spec = set_spec_dict[name]
@@ -155,6 +142,8 @@ def train_multi_input(config):
     desired_set_specs = resolved_set_specs
 
     set_loaders = {}
+    set_loaders['bag'] = {}
+    set_loaders['image'] = {}
     label_encoder = None
     train_classes = None
     muscles_to_use = None
@@ -166,13 +155,13 @@ def train_multi_input(config):
     for set_name, set_spec_list in desired_set_specs.items():
 
         bag_loaders = []
+        image_loaders = []
         for set_spec in set_spec_list:
             print(set_spec)
             # pass the classes in to ensure that only those are present in all the sets
             patients = get_data_for_spec(set_spec, loader_type='bag', attribute=attribute,
-                                     class_values=train_classes,
-                                     muscles_to_use=muscles_to_use)
-           # patients = patients[0:10]
+                                         class_values=train_classes,
+                                         muscles_to_use=muscles_to_use)
             print(f'Loaded {len(patients)} elements.')
 
             # if classification and this is the train set, we want to fit the label encoder on this
@@ -183,16 +172,24 @@ def train_multi_input(config):
             print(get_classes(patients, attribute))
             img_path = set_spec.img_root_path
             # decide which type of loader we need here
-            # always make the bag loader
-            use_pseudopatient_locally = (set_name != 'val') & use_pseudopatients
+            # make the bag loader
             loader = make_bag_loader(patients, img_path, use_one_channel, normalizer_name,
-                                     attribute, batch_size, set_spec.device, limit_image_size=limit_image_size,
-                                     use_pseudopatients=use_pseudopatient_locally,
+                                     attribute, patient_batch_size, set_spec.device, limit_image_size=limit_image_size,
+                                     use_pseudopatients=False,
                                      label_encoder=label_encoder, pin_memory=use_cuda)
             bag_loaders.append(loader)
 
+            # make the image loader
+            images = get_data_for_spec(set_spec, loader_type='image', attribute=attribute,
+                                       class_values=train_classes,
+                                       muscles_to_use=muscles_to_use)
+            image_loader = make_image_loader(images, img_path, use_one_channel, normalizer_name,
+                                             attribute, batch_size, set_spec.device, limit_image_size=limit_image_size,
+                                             label_encoder=label_encoder, pin_memory=use_cuda, is_multi=is_multi)
+            image_loaders.append(image_loader)
 
-        set_loaders[set_name] = bag_loaders
+        set_loaders['bag'][set_name] = bag_loaders
+        set_loaders['image'][set_name] = image_loaders
 
     # output dimensionality of the network
     if train_classes and (len(train_classes) > 2):
@@ -204,7 +201,7 @@ def train_multi_input(config):
     # obtain baseline performance estimates
 
     print('Baseline scores')
-    train_labels = set_loaders['source_train'][0].dataset.get_all_labels()
+    train_labels = set_loaders['bag']['source_train'][0].dataset.get_all_labels()
     if is_classification:
         d = DummyClassifier(strategy='most_frequent')
         scorer = accuracy_score
@@ -216,29 +213,23 @@ def train_multi_input(config):
     score = scorer(train_labels, train_preds)
     print(score)
 
-    for val_loader in set_loaders['val']:
+    for val_loader in set_loaders['bag']['val']:
         val_labels = val_loader.dataset.get_all_labels()
         val_preds = d.predict([0] * len(val_labels))
         score = scorer(val_labels, val_preds)
         print(score)
 
-    # create the desired model
-    model = MultiInputNet(backend=backend, mil_pooling=mil_pooling,
-                      pooling_kwargs=pooling_kwargs,
-                      mode=mil_mode, out_dim=num_classes,
-                      fc_hidden_layers=fc_hidden_layers, fc_use_bn=fc_use_bn,
-                      backend_cutoff=backend_cutoff,
-                      backend_kwargs=backend_kwargs)
+    # get the right cnn
+    backend_func = cnn_constructors[backend]
+    # add the output dim
+    backend_kwargs['num_classes'] = num_classes
+    model = backend_func(**backend_kwargs)
+    n_params_backend = pytorch_count_params(model)
+    # train the whole backend with the same lr
+    optimizer = optim.Adam(model.parameters(), lr)
+    patient_eval = MultiInputBaseline(model, label_type=label_type)
 
-    n_params_backend = pytorch_count_params(model.backend)
-    n_params_classifier = pytorch_count_params(model.classifier)
-    n_params_pooling = pytorch_count_params(model.mil_pooling)
-    config['n_params_classifier'] = n_params_classifier
-    config['n_params_pooling'] = n_params_pooling
-
-    # can specify different learning rates for each component!
-    optimizer = optim.Adam([{'params': model.backend.parameters(), 'lr': backend_lr},
-                            {'params': model.classifier.parameters(), 'lr': lr}], lr)
+    print(f'Using {model}')
 
     config['n_params_backend'] = n_params_backend
 
@@ -259,33 +250,23 @@ def train_multi_input(config):
     def custom_output_transform(x, y, y_pred, loss):
         return {
             "y": y,
-            "y_pred": y_pred['preds'],
-            "atts": y_pred['atts'],
+            "y_pred": y_pred,
             "loss": loss.item()
         }
 
-
-    trainer = create_bag_attention_trainer(model, optimizer, criterion,
-                                           device=device, output_transform=custom_output_transform)
-
+    trainer = create_supervised_trainer(model, optimizer, criterion,
+                                        device=device, output_transform=custom_output_transform,
+                                        deterministic=True)
 
     # always log the loss
     metrics = {'loss': Loss(criterion, output_transform=lambda x: (x['y_pred'], x['y']))}
 
-    # logging attention distributions
-    log_attention = mil_pooling == 'attention'
-    if log_attention:
-        metrics_to_add = {'mean_att': Average(output_transform=lambda output: output['atts']),
-                          'var_att': Variance(output_transform=lambda output: output['atts']),
-                          'min_att': Minimum(output_transform=lambda output: output['atts']),
-                          'max_att': Maximum(output_transform=lambda output: output['atts'])}
-        metrics = {**metrics, **metrics_to_add}
     # binary cases
     if is_classification & (num_classes == 1):
         metrics_to_add = {'accuracy': Accuracy(output_transform=binarize_sigmoid),
                           'p': Precision(output_transform=binarize_sigmoid),
                           'r': Recall(output_transform=binarize_sigmoid),
-                          'pos_share': PositiveShare(output_transform=binarize_sigmoid)
+                          'pos_share': PositiveShare(output_transform=binarize_sigmoid),
                           }
     # non-binary case
     elif is_classification:
@@ -313,9 +294,8 @@ def train_multi_input(config):
         metric.attach(trainer, set_spec)
 
     npt_logger = NeptuneLogger(api_token=NEPTUNE_API_TOKEN, project_name=project_name,
-                               tags=[attribute, 'bag'],
-                               name='multi_input', params=config, offline_mode=offline_mode)
-
+                               tags=[attribute, 'image'],
+                               name='image_baseline', params=config, offline_mode=offline_mode)
 
     # there are two ways to log metrics during training
     # one can log them during the epoch, after each batch
@@ -333,18 +313,13 @@ def train_multi_input(config):
     def custom_output_transform_eval(x, y, y_pred):
         return {
             "y": y,
-            "y_pred": y_pred['preds'],
-            "atts": y_pred['atts'],
+            "y_pred": y_pred,
         }
-
 
     # only if desired incur the extra overhead
     if log_training_metrics_clean:
-
-        # make a separate evaluator and attach to it instead (do a clean pass)
-        train_evaluator = create_bag_attention_evaluator(model, metrics=metrics, device=device,
-                                                         output_transform=custom_output_transform_eval)
-
+        train_evaluator = create_supervised_evaluator(model, metrics=metrics, device=device,
+                                                      output_transform=custom_output_transform_eval)
         # enable training logging
         npt_logger.attach(train_evaluator,
                           log_handler=OutputHandler(tag="training_clean",
@@ -354,14 +329,13 @@ def train_multi_input(config):
 
     # for each validation set, create an evaluator and attach it to the logger
     val_names = desired_set_specs['val']
-    val_loaders = set_loaders['val']
+    val_loaders = set_loaders['image']['val']
     val_evaluators = []
 
     for set_spec, loader in zip(val_names, val_loaders):
-        eval_name = str(set_spec)
-        val_evaluator = create_bag_attention_evaluator(model, metrics=metrics, device=device,
-                                                       output_transform=custom_output_transform_eval)
-
+        eval_name = str(set_spec) + '_image'
+        val_evaluator = create_supervised_evaluator(model, metrics=metrics, device=device,
+                                                    output_transform=custom_output_transform_eval)
         # enable validation logging
         npt_logger.attach(val_evaluator,
                           log_handler=OutputHandler(tag=eval_name,
@@ -369,6 +343,32 @@ def train_multi_input(config):
                                                     global_step_transform=global_step_from_engine(trainer)),
                           event_name=Events.EPOCH_COMPLETED)
         val_evaluators.append(val_evaluator)
+
+    # add patient level baseline evaluators for the image level
+
+    val_loaders_bag = set_loaders['bag']['val']
+    val_evaluators_bag = []
+    for set_spec, loader in zip(val_names, val_loaders_bag):
+        # TODO make sure we use the correct metrics here
+
+        metrics_to_add = {'accuracy': Accuracy(),
+                          'p': Precision(),
+                          'r': Recall(),
+                          'pos_share': PositiveShare()
+                          }
+        #
+        val_evaluator = create_supervised_evaluator(patient_eval, metrics=metrics_to_add, device=device,
+                                                    output_transform=custom_output_transform_eval)
+
+        # val_evaluator = create_image_to_bag_evaluator(model, metrics=metrics_to_add, device=device,
+        #                                             output_transform=custom_output_transform_eval)
+        # enable validation logging
+        npt_logger.attach(val_evaluator,
+                          log_handler=OutputHandler(tag=str(set_spec),
+                                                    metric_names=list(metrics_to_add.keys()),
+                                                    global_step_transform=global_step_from_engine(trainer)),
+                          event_name=Events.EPOCH_COMPLETED)
+        val_evaluators_bag.append(val_evaluator)
 
     # todo migrate this to tensorboard
     if log_grads:
@@ -400,25 +400,27 @@ def train_multi_input(config):
             val_evaluator.run(val_loader)
             print(trainer.state.epoch, val_evaluator.state.metrics)
 
+        # run the patient level baseline
+        for val_evaluator, val_loader in zip(val_evaluators_bag, val_loaders_bag):
+            val_evaluator.run(val_loader)
+            print(trainer.state.epoch, val_evaluator.state.metrics)
+
         #  tune.track.log(iter=evaluator.state.epoch, mean_accuracy=metrics['accuracy'])
 
     # get the appropriate loader
-    train_loader = set_loaders['source_train'][0]
+    train_loader = set_loaders['image']['source_train'][0]
     trainer.run(train_loader, max_epochs=n_epochs)
 
     npt_logger.close()
 
+
 if __name__ == '__main__':
-    # TODO read out from argparse
-    bag_config = {'problem_type': 'bag', 'prediction_target': 'Sex', 'backend_mode': 'finetune',
-                  'backend': 'resnet-18', 'mil_pooling': 'attention', 'attention_mode': 'sigmoid',
-                  'mil_mode': 'embedding', 'batch_size': 4, 'lr': 0.0269311, 'n_epochs': 5,
-                  'use_pseudopatients': True, 'fc_hidden_layers': 2, 'fc_use_bn': True,
-                  'backend_cutoff': 1}
+    config = {'prediction_target': 'Sex', 'backend_mode': 'finetune',
+              'backend': 'resnet-18', 'batch_size': 32, 'lr': 0.0269311, 'n_epochs': 5}
 
     only_philips = {'source_train': 'Philips_iU22_train',
-                         'val': 'Philips_iU22_val'}
+                    'val': 'Philips_iU22_val'}
 
-    config = {**bag_config, **only_philips}
+    config = {**config, **only_philips}
 
-    train_multi_input(config)
+    train_image_level(config)
