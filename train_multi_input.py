@@ -171,13 +171,15 @@ def train_multi_input(config):
             # pass the classes in to ensure that only those are present in all the sets
             patients = get_data_for_spec(set_spec, loader_type='bag', attribute=attribute,
                                      class_values=train_classes,
-                                     muscles_to_use=muscles_to_use)
+                                     muscles_to_use=muscles_to_use, filter_attribute='Class_sample')
            # patients = patients[0:10]
             print(f'Loaded {len(patients)} elements.')
 
             # if classification and this is the train set, we want to fit the label encoder on this
             if is_classification & (set_name == 'source_train'):
                 train_classes = get_classes(patients, attribute)
+                if 'unknown or uncertain' in train_classes:
+                    train_classes.remove('unknown or uncertain')
                 print(train_classes)
                 label_encoder = CustomLabelEncoder(train_classes, one_hot_encode=False)
             print(get_classes(patients, attribute))
@@ -410,7 +412,7 @@ def train_multi_input(config):
 
 if __name__ == '__main__':
     # TODO read out from argparse
-    bag_config = {'problem_type': 'bag', 'prediction_target': 'Sex', 'backend_mode': 'finetune',
+    bag_config = {'problem_type': 'bag', 'prediction_target': 'Class', 'backend_mode': 'finetune',
                   'backend': 'resnet-18', 'mil_pooling': 'attention', 'attention_mode': 'sigmoid',
                   'mil_mode': 'embedding', 'batch_size': 4, 'lr': 0.0269311, 'n_epochs': 5,
                   'use_pseudopatients': True, 'fc_hidden_layers': 2, 'fc_use_bn': True,
@@ -419,6 +421,8 @@ if __name__ == '__main__':
     only_philips = {'source_train': 'Philips_iU22_train',
                          'val': 'Philips_iU22_val'}
 
-    config = {**bag_config, **only_philips}
+    only_esaote = {'source_train': 'ESAOTE_6100_train',
+                         'val': 'ESAOTE_6100_val'}
+    config = {**bag_config, **only_esaote}
 
     train_multi_input(config)

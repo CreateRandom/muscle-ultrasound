@@ -88,7 +88,7 @@ def make_basic_transform(resize_option_name, normalizer_name=None, limit_image_s
 
 
 def umc_to_image_frame(patient_path, record_path, image_path, attribute_to_use=None,
-                       muscles_to_use=None, class_values=None) -> pd.DataFrame:
+                       muscles_to_use=None, class_values=None, filter_attribute=None) -> pd.DataFrame:
     patients = pd.read_pickle(patient_path)
 
     records = pd.read_pickle(record_path)
@@ -109,10 +109,14 @@ def umc_to_image_frame(patient_path, record_path, image_path, attribute_to_use=N
 
     # merge in patient level information
     images = pd.merge(images, patients, on=['pid'], how='left')
-
+    if filter_attribute:
+        images = images[images[filter_attribute]]
+        print(f'Retained {len(images)} images after filtering on {filter_attribute}.')
     if attribute_to_use:
         images.dropna(subset=[attribute_to_use], inplace=True)
         print(f'Retained {len(images)} images after dropping null values.')
+
+        print(f'Retained {len(images)} images after filtering on {filter_attribute}.')
         if class_values:
             drop_values = set(images[~images[attribute_to_use].isin(class_values)][attribute_to_use])
             if drop_values:
@@ -123,7 +127,7 @@ def umc_to_image_frame(patient_path, record_path, image_path, attribute_to_use=N
 
 
 def umc_to_patient_list(patient_path, record_path, image_path, attribute_to_use=None, muscles_to_use=None,
-                        class_values=None) -> List[
+                        class_values=None, filter_attribute=None) -> List[
     Patient]:
     patients = pd.read_pickle(patient_path)
 
@@ -131,6 +135,14 @@ def umc_to_patient_list(patient_path, record_path, image_path, attribute_to_use=
     images = pd.read_pickle(image_path)
     patients.set_index('pid', inplace=True)
     print(f'Read {len(patients)} patients, {len(records)} records and {len(images)} images.')
+    if filter_attribute:
+        patients = patients[patients[filter_attribute]]
+        records = records[records.pid.isin(set(patients.index))]
+        images = images[images['rid'].isin(records.rid)]
+        print(
+            f'Retained {len(patients)} patients, {len(records)} records and {len(images)} images after filtering on {filter_attribute}.')
+
+
     if attribute_to_use:
         patients.dropna(subset=[attribute_to_use], inplace=True)
         records = records[records.pid.isin(set(patients.index))]
@@ -286,7 +298,8 @@ def get_classes(data: Union[pd.DataFrame, List[Patient]], attribute):
         print(pd.Series(atts).value_counts())
         return set(atts)
 
-def get_data_for_spec(set_spec : SetSpec, loader_type='bag', attribute='Class', class_values=None, muscles_to_use=None):
+def get_data_for_spec(set_spec : SetSpec, loader_type='bag', attribute='Class', class_values=None, muscles_to_use=None,
+                      filter_attribute=None, values_to_exclude=None):
     dataset_type = set_spec.dataset_type
     data_path = set_spec.label_path
     device_name = set_spec.device
@@ -300,7 +313,8 @@ def get_data_for_spec(set_spec : SetSpec, loader_type='bag', attribute='Class', 
             patients = umc_to_patient_list(os.path.join(to_load, 'patients.pkl'),
                                            os.path.join(to_load, 'records.pkl'),
                                            os.path.join(to_load, 'images.pkl'),
-                                           attribute_to_use=attribute, class_values=class_values,muscles_to_use=muscles_to_use)
+                                           attribute_to_use=attribute, filter_attribute=filter_attribute,
+                                           class_values=class_values,muscles_to_use=muscles_to_use)
             return patients
 
         elif loader_type == 'image':
@@ -308,7 +322,8 @@ def get_data_for_spec(set_spec : SetSpec, loader_type='bag', attribute='Class', 
             images = umc_to_image_frame(os.path.join(to_load, 'patients.pkl'),
                                         os.path.join(to_load, 'records.pkl'),
                                         os.path.join(to_load, 'images.pkl'),
-                                        attribute_to_use=attribute, class_values=class_values,muscles_to_use=muscles_to_use)
+                                        attribute_to_use=attribute, filter_attribute=filter_attribute,
+                                        class_values=class_values,muscles_to_use=muscles_to_use)
 
             return images
 

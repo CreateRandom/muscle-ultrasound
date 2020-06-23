@@ -12,11 +12,11 @@ def run_rq1():
     # see here https://github.com/ray-project/ray/issues/7084
     ray.init(webui_host='127.0.0.1', object_store_memory=OBJECT_STORE_MINIMUM_MEMORY_BYTES)
 
-    base_config = {'prediction_target': 'Sex', 'backend_mode': 'finetune',
+    base_config = {'prediction_target': 'Class', 'backend_mode': 'finetune',
               'backend': 'resnet-18', 'n_epochs': 10, 'neptune_project': 'createrandom/MUS-RQ1'}
 
     esoate_train = {'source_train': 'ESAOTE_6100_train',
-                         'val': ['Philips_iU22_val', 'ESAOTE_6100_val']}
+                         'val': ['ESAOTE_6100_val']}
 
     base_config = {**base_config, **esoate_train}
 
@@ -41,7 +41,7 @@ def run_rq1():
         # effective extract_only should be possible by setting a very small lr
         "backend_lr": sample_from(lambda x: random.uniform(0.001, 0.1))
     }
-    num_samples = 3
+    num_samples = 12
 
     config = {**bag_config, **bag_sweep_config}
 
