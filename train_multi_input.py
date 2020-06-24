@@ -20,7 +20,7 @@ from ignite.contrib.handlers import ProgressBar
 from ignite.handlers import global_step_from_engine
 import numpy as np
 from sklearn.dummy import DummyClassifier, DummyRegressor
-from training_utils import problems, fix_seed
+from training_utils import problem_kind, fix_seed, problem_legal_values
 # import logging
 from ignite.contrib.handlers.neptune_logger import NeptuneLogger, OutputHandler, WeightsScalarHandler, \
     GradsScalarHandler
@@ -74,9 +74,9 @@ def train_multi_input(config):
 
     attribute = config.get('prediction_target', 'Age')
 
-    if attribute not in problems:
+    if attribute not in problem_kind:
         raise ValueError(f'Unknown attribute {attribute}')
-    label_type = problems[attribute]
+    label_type = problem_kind[attribute]
     is_classification = (label_type == 'multi' or (label_type == 'binary'))
     is_multi = (label_type == 'multi')
     # TRAINING ASPECTS
@@ -156,7 +156,7 @@ def train_multi_input(config):
 
     set_loaders = {}
     label_encoder = None
-    train_classes = None
+    train_classes = problem_legal_values[attribute] if attribute in problem_legal_values else None
     muscles_to_use = None
     use_most_frequent_muscles = config.get('muscle_subset', False)
     if use_most_frequent_muscles:
@@ -177,9 +177,9 @@ def train_multi_input(config):
 
             # if classification and this is the train set, we want to fit the label encoder on this
             if is_classification & (set_name == 'source_train'):
-                train_classes = get_classes(patients, attribute)
-                if 'unknown or uncertain' in train_classes:
-                    train_classes.remove('unknown or uncertain')
+                # if not specified yet, get all classes from the training set
+                if not train_classes:
+                    train_classes = get_classes(patients, attribute)
                 print(train_classes)
                 label_encoder = CustomLabelEncoder(train_classes, one_hot_encode=False)
             print(get_classes(patients, attribute))
@@ -216,13 +216,13 @@ def train_multi_input(config):
     d.fit([0] * len(train_labels), train_labels)
     train_preds = d.predict([0] * len(train_labels))
     score = scorer(train_labels, train_preds)
-    print(score)
+    print(f'Naive score on training set: {score}')
 
     for val_loader in set_loaders['val']:
         val_labels = val_loader.dataset.get_all_labels()
         val_preds = d.predict([0] * len(val_labels))
         score = scorer(val_labels, val_preds)
-        print(score)
+        print(f'Naive score on validation set: {score}')
 
     # create the desired model
     model = MultiInputNet(backend=backend, mil_pooling=mil_pooling,

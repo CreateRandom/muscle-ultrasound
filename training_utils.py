@@ -4,9 +4,10 @@ import random
 import numpy as np
 import torch
 
-problems = {'Sex': 'binary', 'Age': 'regression', 'BMI': 'regression',
-            'Muscle': 'multi', 'Class': 'multi'}
+problem_kind = {'Sex': 'binary', 'Age': 'regression', 'BMI': 'regression',
+            'Muscle': 'multi', 'Class': 'binary'}
 
+problem_legal_values = {'Class': ['NMD', 'no NMD']}
 
 def fix_seed(seed):
     torch.manual_seed(seed)

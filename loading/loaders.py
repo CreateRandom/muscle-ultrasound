@@ -299,7 +299,7 @@ def get_classes(data: Union[pd.DataFrame, List[Patient]], attribute):
         return set(atts)
 
 def get_data_for_spec(set_spec : SetSpec, loader_type='bag', attribute='Class', class_values=None, muscles_to_use=None,
-                      filter_attribute=None, values_to_exclude=None):
+                      filter_attribute=None):
     dataset_type = set_spec.dataset_type
     data_path = set_spec.label_path
     device_name = set_spec.device
@@ -337,7 +337,7 @@ def get_data_for_spec(set_spec : SetSpec, loader_type='bag', attribute='Class', 
         if class_values:
             drop_values = set(image_frame[~image_frame[attribute].isin(class_values)][attribute])
             if drop_values:
-                patients = image_frame[image_frame[attribute].isin(class_values)]
+                image_frame = image_frame[image_frame[attribute].isin(class_values)]
                 print(
                     f'Retained {len(image_frame)} images after dropping {drop_values}.')
 

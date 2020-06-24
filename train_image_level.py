@@ -1,7 +1,7 @@
 from sklearn.metrics import mean_absolute_error, accuracy_score
 from torch.nn import BCEWithLogitsLoss, MSELoss, CrossEntropyLoss
 
-from training_utils import problems, fix_seed
+from training_utils import problem_kind, fix_seed, problem_legal_values
 from loading.datasets import CustomLabelEncoder
 from loading.loaders import make_bag_loader, \
     get_data_for_spec, make_image_loader, get_classes
@@ -63,9 +63,9 @@ def train_image_level(config):
 
     attribute = config.get('prediction_target', 'Age')
 
-    if attribute not in problems:
+    if attribute not in problem_kind:
         raise ValueError(f'Unknown attribute {attribute}')
-    label_type = problems[attribute]
+    label_type = problem_kind[attribute]
     is_classification = (label_type == 'multi' or (label_type == 'binary'))
     is_multi = (label_type == 'multi')
     # TRAINING ASPECTS
@@ -145,7 +145,7 @@ def train_image_level(config):
     set_loaders['bag'] = {}
     set_loaders['image'] = {}
     label_encoder = None
-    train_classes = None
+    train_classes = problem_legal_values[attribute] if attribute in problem_legal_values else None
     muscles_to_use = None
     use_most_frequent_muscles = config.get('muscle_subset', False)
     if use_most_frequent_muscles:
@@ -166,7 +166,9 @@ def train_image_level(config):
 
             # if classification and this is the train set, we want to fit the label encoder on this
             if is_classification & (set_name == 'source_train'):
-                train_classes = get_classes(patients, attribute)
+                # if not specified yet, get all classes from the training set
+                if not train_classes:
+                    train_classes = get_classes(patients, attribute)
                 print(train_classes)
                 label_encoder = CustomLabelEncoder(train_classes, one_hot_encode=False)
             print(get_classes(patients, attribute))
@@ -419,9 +421,9 @@ if __name__ == '__main__':
     config = {'prediction_target': 'Sex', 'backend_mode': 'finetune',
               'backend': 'resnet-18', 'batch_size': 32, 'lr': 0.0269311, 'n_epochs': 5}
 
-    only_philips = {'source_train': 'Philips_iU22_train',
-                    'val': 'Philips_iU22_val'}
+    esoate_train = {'source_train': 'ESAOTE_6100_train',
+                         'val': ['ESAOTE_6100_val']}
 
-    config = {**config, **only_philips}
+    config = {**config, **esoate_train}
 
     train_image_level(config)
