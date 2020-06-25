@@ -268,7 +268,8 @@ def train_multi_input(config):
 
 
     trainer = create_bag_attention_trainer(model, optimizer, criterion,
-                                           device=device, output_transform=custom_output_transform)
+                                           device=device, output_transform=custom_output_transform,
+                                           deterministic=True)
 
 
     # always log the loss
