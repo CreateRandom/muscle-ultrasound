@@ -14,56 +14,60 @@ def run_rq1():
 
     num_samples = 12
 
-    base_config = {'prediction_target': 'Class', 'backend_mode': 'finetune',
-              'backend': 'resnet-18', 'n_epochs': 10, 'neptune_project': 'createrandom/MUS-RQ1'}
+    attributes = ['Age', 'BMI', 'Sex']
 
-    esoate_train = {'source_train': 'ESAOTE_6100_train',
-                         'val': ['ESAOTE_6100_val']}
+    for attribute in attributes:
 
-    base_config = {**base_config, **esoate_train}
+        base_config = {'prediction_target': attribute, 'backend_mode': 'finetune',
+                  'backend': 'resnet-18', 'n_epochs': 10, 'neptune_project': 'createrandom/MUS-RQ1'}
 
+        esoate_train = {'source_train': 'ESAOTE_6100_train',
+                             'val': ['ESAOTE_6100_val', 'Philips_iU22_val']}
 
-    image_config = {'problem_type': 'image', 'batch_size': 32}
-
-    image_config = {**base_config, **image_config}
-
-    image_sweep_config = {"lr": sample_from(lambda x: random.uniform(0.001, 0.1))}
-
-    config = {**image_config, **image_sweep_config}
+        base_config = {**base_config, **esoate_train}
 
 
-    tune.run(train_image_level,
-             config=config,
-             num_samples=num_samples,
-             resources_per_trial={"gpu": 1, "cpu": 8})
+        image_config = {'problem_type': 'image', 'batch_size': 32}
 
-    # decide what to run here
+        image_config = {**base_config, **image_config}
 
-    bag_config_mean = {'problem_type': 'bag', 'batch_size': 8, 'mil_mode': 'embedding',
-                  'use_pseudopatients': True, 'fc_use_bn': True, 'fc_hidden_layers': 2,
-                  'backend_cutoff': 1}
+        image_sweep_config = {"lr": sample_from(lambda x: random.uniform(0.001, 0.1))}
 
-    bag_config_mean = {**base_config, **bag_config_mean, **{'mil_pooling': 'mean'}}
+        config = {**image_config, **image_sweep_config}
 
-    bag_config_att = {**base_config, **bag_config_mean, **{'mil_pooling': 'attention', 'attention_mode': 'sigmoid'}}
 
-    bag_sweep_config = {
-        # lr for bag classifier and pooling
-        "lr": sample_from(lambda x: random.uniform(0.001, 0.1)),
-        # effective extract_only should be possible by setting a very small lr
-        "backend_lr": sample_from(lambda x: random.uniform(0.001, 0.1))
-    }
+        tune.run(train_image_level,
+                 config=config,
+                 num_samples=num_samples,
+                 resources_per_trial={"gpu": 1, "cpu": 8})
 
-    config = {**bag_config_mean, **bag_sweep_config}
+        # decide what to run here
 
-    tune.run(train_multi_input,
-             config=config,
-             num_samples=num_samples,
-             resources_per_trial={"gpu": 1, "cpu": 8})
+        bag_config_mean = {'problem_type': 'bag', 'batch_size': 8, 'mil_mode': 'embedding',
+                      'use_pseudopatients': True, 'fc_use_bn': True, 'fc_hidden_layers': 2,
+                      'backend_cutoff': 1}
 
-    config = {**bag_config_att, **bag_sweep_config}
+        bag_config_mean = {**base_config, **bag_config_mean, **{'mil_pooling': 'mean'}}
 
-    tune.run(train_multi_input,
-             config=config,
-             num_samples=num_samples,
-             resources_per_trial={"gpu": 1, "cpu": 8})
+        bag_config_att = {**base_config, **bag_config_mean, **{'mil_pooling': 'attention', 'attention_mode': 'sigmoid'}}
+
+        bag_sweep_config = {
+            # lr for bag classifier and pooling
+            "lr": sample_from(lambda x: random.uniform(0.001, 0.1)),
+            # effective extract_only should be possible by setting a very small lr
+            "backend_lr": sample_from(lambda x: random.uniform(0.001, 0.1))
+        }
+
+        config = {**bag_config_mean, **bag_sweep_config}
+
+        tune.run(train_multi_input,
+                 config=config,
+                 num_samples=num_samples,
+                 resources_per_trial={"gpu": 1, "cpu": 8})
+
+        config = {**bag_config_att, **bag_sweep_config}
+
+        tune.run(train_multi_input,
+                 config=config,
+                 num_samples=num_samples,
+                 resources_per_trial={"gpu": 1, "cpu": 8})

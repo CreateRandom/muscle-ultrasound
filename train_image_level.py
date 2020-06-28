@@ -70,7 +70,7 @@ def train_image_level(config):
     is_multi = (label_type == 'multi')
     # TRAINING ASPECTS
     batch_size = config.get('batch_size', 4)
-    patient_batch_size = config.get('batch_size', 4)
+    patient_batch_size = config.get('patient_batch_size', 4)
 
     # whether to crop images to ImageNet size (i.e. 224 * 224)
     limit_image_size = config.get('limit_image_size', True)
@@ -171,7 +171,6 @@ def train_image_level(config):
                     train_classes = get_classes(patients, attribute)
                 print(train_classes)
                 label_encoder = CustomLabelEncoder(train_classes, one_hot_encode=False)
-            print(get_classes(patients, attribute))
             img_path = set_spec.img_root_path
             # decide which type of loader we need here
             # make the bag loader
@@ -352,13 +351,30 @@ def train_image_level(config):
     val_loaders_bag = set_loaders['bag']['val']
     val_evaluators_bag = []
     for set_spec, loader in zip(val_names, val_loaders_bag):
-        # TODO make sure we use the correct metrics here
 
-        metrics_to_add = {'accuracy': Accuracy(),
-                          'p': Precision(),
-                          'r': Recall(),
-                          'pos_share': PositiveShare()
-                          }
+        if is_classification & (num_classes == 1):
+            metrics_to_add = {'accuracy': Accuracy(),
+                              'p': Precision(),
+                              'r': Recall(),
+                              'pos_share': PositiveShare()
+                              }
+        elif is_classification:
+            p = Precision(average=False)
+            r = Recall(average=False)
+            F1 = p * r * 2 / (p + r + 1e-20)
+            F1 = MetricsLambda(lambda t: torch.mean(t).item(), F1)
+
+            metrics_to_add = {'accuracy': Accuracy(),
+                              'ap': Precision(average=True),
+                              'ar': Recall( average=True),
+                              'f1': F1,
+                              'cm': ConfusionMatrix(num_classes=num_classes)
+                              }
+
+        else:
+            metrics_to_add = {'mae': MeanAbsoluteError(),
+                              'mean': Average(output_transform=lambda output: output['y_pred']),
+                              'var': Variance(output_transform=lambda output: output['y_pred'])}
 
         val_evaluator = create_supervised_evaluator(patient_eval, metrics=metrics_to_add, device=device,
                                                     output_transform=custom_output_transform_eval)
