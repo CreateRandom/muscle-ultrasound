@@ -53,7 +53,7 @@ resize_params_limited = {'ESAOTE_6100': {'center_crop': (480, 480), 'resize': (2
 
 # center crop esoate and myo to 480 * 503
 # center philips to the corresponding 561 * 588, then scale down
-def make_basic_transform(resize_option_name, normalizer_name=None, limit_image_size=False):
+def make_basic_transform(resize_option_name, normalizer_name=None, to_tensor=True, limit_image_size=False):
     t_list = []
     if limit_image_size:
         resize_dict = resize_params_limited[resize_option_name]
@@ -71,9 +71,9 @@ def make_basic_transform(resize_option_name, normalizer_name=None, limit_image_s
         img_size = resize_dict['resize']
         resize = Resize(img_size)
         t_list.append(resize)
-
-    # toTensor automatically scales between 0 and 1
-    t_list.append(transforms.ToTensor())
+    if to_tensor:
+        # toTensor automatically scales between 0 and 1
+        t_list.append(transforms.ToTensor())
 
     # pixel values in 0-1 range to z-scores
     if normalizer_name:
@@ -227,6 +227,26 @@ def make_bag_loader(patients: List[Patient], img_folder, use_one_channel, normal
     n_cpu = get_n_cpu()
     loader = DataLoader(ds, batch_size=batch_size, shuffle=True, num_workers=n_cpu, collate_fn=collate_bags_to_batch,
                         pin_memory=pin_memory, drop_last=True)
+
+    return loader
+
+def make_image_exporter(image_frame: pd.DataFrame, img_folder, use_one_channel, batch_size,
+                      device, export_path):
+
+    transform = make_basic_transform(device, normalizer_name=None, to_tensor=False, limit_image_size=True)
+
+    def export_batch(batch):
+        for image, name in batch:
+            image.save(os.path.join(export_path,name))
+        return batch
+
+    ds = SingleImageDataset(image_frame=image_frame,root_dir=img_folder,attribute='Image',transform=transform,
+                            use_one_channel=use_one_channel)
+
+    n_cpu = get_n_cpu()
+
+    loader = DataLoader(ds, batch_size=batch_size, shuffle=True, num_workers=n_cpu, collate_fn=export_batch,
+                        drop_last=True)
 
     return loader
 
