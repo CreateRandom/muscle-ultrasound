@@ -2,9 +2,10 @@ from loading.loaders import SetSpec
 
 def make_set_specs(umc_data_path, umc_img_root, jhu_data_path, jhu_img_root):
     # for each device, we have a test, val and a test set
-    device_mapping = {'ESAOTE_6100': 'umc', 'GE_Logiq_E': 'jhu', 'Philips_iU22': 'umc'}
+    device_mapping = {'ESAOTE_6100': 'umc', 'GE_Logiq_E': 'jhu', 'Philips_iU22': 'umc',
+                      'Multiple': 'umc'}
     device_splits = {'ESAOTE_6100': ['train', 'val', 'test'], 'GE_Logiq_E': ['im_muscle_chart'],
-                     'Philips_iU22': ['train', 'val', 'test']}
+                     'Philips_iU22': ['train', 'val', 'test'], 'Multiple': ['train', 'val', 'test']}
 
     label_paths = {'umc': umc_data_path, 'jhu': jhu_data_path}
     img_root_paths = {'umc': umc_img_root, 'jhu': jhu_img_root}
