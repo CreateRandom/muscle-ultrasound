@@ -158,10 +158,12 @@ def train_image_level(config):
         image_loaders = []
         for set_spec in set_spec_list:
             print(set_spec)
+            filter_attribute = 'Class_sample' if attribute == 'Class' else None
+
             # pass the classes in to ensure that only those are present in all the sets
             patients = get_data_for_spec(set_spec, loader_type='bag', attribute=attribute,
                                          class_values=train_classes,
-                                         muscles_to_use=muscles_to_use)
+                                         muscles_to_use=muscles_to_use, filter_attribute=filter_attribute)
             print(f'Loaded {len(patients)} elements.')
 
             # if classification and this is the train set, we want to fit the label encoder on this
@@ -172,7 +174,7 @@ def train_image_level(config):
                 print(train_classes)
                 label_encoder = CustomLabelEncoder(train_classes, one_hot_encode=False)
             img_path = set_spec.img_root_path
-            # decide which type of loader we need here
+
             # make the bag loader
             loader = make_bag_loader(patients, img_path, use_one_channel, normalizer_name,
                                      attribute, patient_batch_size, set_spec.device, limit_image_size=limit_image_size,
@@ -183,7 +185,7 @@ def train_image_level(config):
             # make the image loader
             images = get_data_for_spec(set_spec, loader_type='image', attribute=attribute,
                                        class_values=train_classes,
-                                       muscles_to_use=muscles_to_use)
+                                       muscles_to_use=muscles_to_use, filter_attribute=filter_attribute)
             image_loader = make_image_loader(images, img_path, use_one_channel, normalizer_name,
                                              attribute, batch_size, set_spec.device, limit_image_size=limit_image_size,
                                              label_encoder=label_encoder, pin_memory=use_cuda, is_multi=is_multi)

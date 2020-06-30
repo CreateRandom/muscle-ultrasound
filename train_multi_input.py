@@ -168,10 +168,12 @@ def train_multi_input(config):
         bag_loaders = []
         for set_spec in set_spec_list:
             print(set_spec)
+            filter_attribute = 'Class_sample' if attribute == 'Class' else None
+
             # pass the classes in to ensure that only those are present in all the sets
             patients = get_data_for_spec(set_spec, loader_type='bag', attribute=attribute,
                                      class_values=train_classes,
-                                     muscles_to_use=muscles_to_use, filter_attribute='Class_sample')
+                                     muscles_to_use=muscles_to_use, filter_attribute=filter_attribute)
            # patients = patients[0:10]
             print(f'Loaded {len(patients)} elements.')
 
