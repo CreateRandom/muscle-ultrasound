@@ -14,7 +14,7 @@ def run_rq1():
 
     num_samples = 12
 
-    attributes = ['Age', 'BMI', 'Sex']
+    attributes = ['Class']
 
     for attribute in attributes:
 
@@ -28,7 +28,7 @@ def run_rq1():
         philips_train = {'source_train': 'Philips_iU22_train',
                              'val': ['ESAOTE_6100_val', 'Philips_iU22_val']}
 
-        train_set_spec = philips_train
+        train_set_spec = esaote_train
 
         base_config = {**base_config, **train_set_spec}
 

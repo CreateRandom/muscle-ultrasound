@@ -224,6 +224,8 @@ def make_bag_loader(patients: List[Patient], img_folder, use_one_channel, normal
     ds = PatientBagDataset(patient_list=patients, root_dir=img_folder,
                            attribute=attribute, transform=transform, use_pseudopatients=use_pseudopatients,
                            muscles_to_use=None, use_one_channel=use_one_channel, label_encoder= label_encoder)
+
+    print(f'Total number of images in bag loader: {ds.get_total_number_of_images()}')
     n_cpu = get_n_cpu()
     loader = DataLoader(ds, batch_size=batch_size, shuffle=True, num_workers=n_cpu, collate_fn=collate_bags_to_batch,
                         pin_memory=pin_memory, drop_last=True)

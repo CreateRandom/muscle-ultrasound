@@ -145,6 +145,20 @@ class PatientBagDataset(Dataset):
             labels = [self.label_encoder.get_classification_label(l) for l in labels]
         return labels
 
+    def get_total_number_of_images(self):
+        total_count = 0
+        for patient in self.patients:
+            sample = patient.get_selected_record()
+            image_frame = sample.image_frame.copy()
+
+            if self.muscles_to_use is not None:
+                image_frame = image_frame['Muscle'].isin(self.muscles_to_use)
+
+            # retain n images for each muscle (and side) (n=1 --> the first image)
+            image_frame = image_frame.groupby(self.grouper).head(self.n_images_per_channel)
+            total_count = total_count + len(image_frame)
+        return total_count
+
     def __getitem__(self, idx):
         if is_tensor(idx):
             idx = idx.tolist()
