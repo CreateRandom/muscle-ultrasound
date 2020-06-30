@@ -21,10 +21,16 @@ def run_rq1():
         base_config = {'prediction_target': attribute, 'backend_mode': 'finetune',
                   'backend': 'resnet-18', 'n_epochs': 10, 'neptune_project': 'createrandom/MUS-RQ1'}
 
-        esoate_train = {'source_train': 'ESAOTE_6100_train',
+
+        esaote_train = {'source_train': 'ESAOTE_6100_train',
                              'val': ['ESAOTE_6100_val', 'Philips_iU22_val']}
 
-        base_config = {**base_config, **esoate_train}
+        philips_train = {'source_train': 'Philips_iU22_train',
+                             'val': ['ESAOTE_6100_val', 'Philips_iU22_val']}
+
+        train_set_spec = philips_train
+
+        base_config = {**base_config, **train_set_spec}
 
 
         image_config = {'problem_type': 'image', 'batch_size': 32}
