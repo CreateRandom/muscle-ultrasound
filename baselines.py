@@ -6,13 +6,13 @@ from inspect import signature
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy import stats
-from sklearn.dummy import DummyClassifier
+from sklearn.dummy import DummyClassifier, DummyRegressor
 from sklearn.linear_model import LinearRegression
 import pandas as pd
 from loading.datasets import PatientRecord
 from loading.loaders import get_data_for_spec
 from loading.loading_utils import make_set_specs
-from training_utils import problem_legal_values
+from training_utils import problem_legal_values, problem_kind
 
 from sklearn.metrics import mean_absolute_error, accuracy_score, classification_report
 
@@ -156,13 +156,19 @@ def run_dummy_baseline(set_name, attribute):
 
     y_true = [patient.attributes[attribute] for patient in patients]
 
-    d = DummyClassifier(strategy='most_frequent')
+    kind = problem_kind[attribute]
 
+    if kind == 'regression':
+        d = DummyRegressor(strategy='mean')
+        scorer = mean_absolute_error
+
+    else:
+        d = DummyClassifier(strategy='most_frequent')
+        scorer = classification_report
     d.fit([0] * len(y_true), y_true)
-
     train_preds = d.predict([0] * len(y_true))
 
-    print(classification_report(y_true, train_preds))
+    print(scorer(y_true, train_preds))
 
 
 def run_rule_based_baseline(set_name):
@@ -230,8 +236,20 @@ def run_rule_based_baseline(set_name):
     y_pred_recall_biased = [elem if elem != 'unknown or uncertain' else 'NMD' for elem in y_pred_old]
     y_pred_precision_biased = [elem if elem != 'unknown or uncertain' else 'no NMD' for elem in y_pred_old]
 
+    p = np.array(patients)
+
+
     print('Focus on recall')
     print(classification_report(y_true,y_pred_recall_biased))
+    errors = np.where(np.array(y_true) != np.array(y_pred_recall_biased))
+    info_dicts = []
+    x = p[errors]
+    for patient in x:
+        info = patient.get_selected_record().meta_info
+        info_dicts.append(info)
+
+    error_frame = pd.DataFrame(info_dicts)
+
 
     print('Focus on precision')
     print(classification_report(y_true, y_pred_precision_biased))
@@ -385,5 +403,5 @@ def align_records(record_a, record_b):
 
 if __name__ == '__main__':
   #  analyze_multi_device_patients()
-    run_rule_based_baseline('Philips_iU22_val')
-    run_dummy_baseline('ESAOTE_6100_val', 'Class')
+    run_rule_based_baseline('ESAOTE_6100_val')
+    run_dummy_baseline('ESAOTE_6100_val', 'Sex')
