@@ -35,7 +35,7 @@ patients = umc_to_patient_list(os.path.join(base_path, 'patients.pkl'),
 
 transform = make_basic_transform(device, limit_image_size=True)
 ds = PatientBagDataset(patient_list=patients, root_dir='/mnt/chansey/klaus/total_patients/', use_pseudopatients=False,
-                       attribute='Sex', transform=transform,stack_images=False, use_mask=False)
+                       attribute_specs=[], transform=transform,stack_images=False, use_mask=False)
 for i in range(5):
     x, y = ds[i]
     for elem in x:

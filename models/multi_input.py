@@ -6,7 +6,7 @@ from torch import nn
 import numpy as np
 from models.mil_pooling import MaxMIL, AttentionMIL, AverageMIL, GatedAttentionMIL
 from models.premade import make_resnet_18, make_alexnet
-from utils.ignite_utils import _binarize_sigmoid, _binarize_softmax
+from utils.metric_utils import _binarize_softmax, _binarize_sigmoid
 
 
 class MultiInputAlexNet(nn.Module):
@@ -167,7 +167,7 @@ backend_funcs = {'resnet-18': make_resnet_backend, 'default': make_default_backe
 cnn_constructors = {'resnet-18': make_resnet_18, 'alexnet': make_alexnet}
 # for now, we will always assume binary classification, maybe later see how to expand this
 class MultiInputNet(nn.Module):
-    def __init__(self, backend='alexnet', mil_pooling='attention', mode='embedding', out_dim=1,
+    def __init__(self, att_specs, backend='alexnet', mil_pooling='attention', mode='embedding',
                  fc_hidden_layers=0, fc_use_bn=True, backend_cutoff=0,
                  backend_kwargs=None, pooling_kwargs=None):
         super(MultiInputNet, self).__init__()
@@ -178,7 +178,6 @@ class MultiInputNet(nn.Module):
 
         self.pooling_kwargs = default_pooling if not pooling_kwargs else pooling_kwargs
         self.backend_kwargs = {} if not backend_kwargs else backend_kwargs
-        self.out_dim = out_dim
         self.mil_pooling_type = mil_pooling
         # allows for multiple backends
         self.backend, self.backend_out_dim = self.make_backend(backend, mode, backend_cutoff, self.backend_kwargs)
@@ -194,8 +193,20 @@ class MultiInputNet(nn.Module):
             if dim > 1:
                 self.hidden_dims.append(dim)
         print(f'Using hidden dims {self.hidden_dims}')
-        self.classifier = self.make_classifier(hidden_dims=self.hidden_dims, in_dim=self.backend_out_dim,
-                                               out_dim=self.out_dim, activation='leaky_relu',bn=fc_use_bn)
+   #     self.classifier = self.make_classifier(hidden_dims=self.hidden_dims, in_dim=self.backend_out_dim,
+   #                                            out_dim=self.out_dim, activation='leaky_relu',bn=fc_use_bn)
+
+        self.heads = {}
+        for att_spec in att_specs:
+            if att_spec.target_type == 'regression' or att_spec.target_type == 'binary':
+                out_dim = 1
+            else:
+                out_dim = len(att_spec.legal_values)
+            classifier = self.make_classifier(hidden_dims=self.hidden_dims, in_dim=self.backend_out_dim,
+                                               out_dim=out_dim, activation='leaky_relu',bn=fc_use_bn)
+            self.add_module(att_spec.name  + '_head', classifier)
+            self.heads[att_spec.name] = classifier
+
 
     def __str__(self):
         return f'MultiInputNet with {self.backend_type} ' \
@@ -239,20 +250,26 @@ class MultiInputNet(nn.Module):
             p, att = self.mil_pooling(elem)
             pooled.append(p.squeeze())
             if att is not None:
-                attention_outputs.append(att)
+                attention_outputs.append(att.clone().detach())
         pooled = torch.stack(pooled)
 
         # ensure batch first format
         if pooled.ndimension() == 1:
              pooled = pooled.unsqueeze(0)
 
-        pooled = self.classifier(pooled)
+       # pooled = self.classifier(pooled)
+        head_outputs = {}
+        for name, head in self.heads.items():
+            output = head(pooled)
+            if output.ndimension() == 1:
+                output = output.unsqueeze(1)
+            head_outputs[name] = output
 
-        # ensure batch first format
-        if pooled.ndimension() == 1:
-            pooled = pooled.unsqueeze(1)
+        # # ensure batch first format
+        # if pooled.ndimension() == 1:
+        #     pooled = pooled.unsqueeze(1)
 
-        return pooled, attention_outputs
+        return head_outputs, attention_outputs
 
     @staticmethod
     def make_backend(backend_name, mode, backend_cutoff, backend_kwargs):

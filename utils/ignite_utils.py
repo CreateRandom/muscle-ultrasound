@@ -1,124 +1,17 @@
-from collections import Counter
-from functools import reduce
-
-import numpy as np
 from typing import Any, Callable, Optional, Union, Sequence, Tuple, Dict
 
 import torch
 
 from ignite.engine import _prepare_batch, Engine, DeterministicEngine
 from ignite.metrics import Metric
-from torch import nn
 
-def pytorch_count_params(model):
-  "count number trainable parameters in a pytorch model"
-  total_params = sum(reduce( lambda a, b: a*b, x.size()) for x in model.parameters())
-  return total_params
+from utils.metric_utils import loss_mapping
 
-class SimpleAccumulator(Metric):
-    def __init__(self, output_transform: Callable = lambda x: x, device: Optional[Union[str, torch.device]] = None):
-        super().__init__(output_transform, device)
-        self.values = []
-
-    def reset(self) -> None:
-        self.values = []
-
-    def update(self, output) -> None:
-        self.values.extend(list(output.flatten().cpu().numpy()))
-
-    def compute(self) -> Any:
-        pass
-
-class PositiveShare(Metric):
-
-    def __init__(self, output_transform: Callable = lambda x: x, device: Optional[Union[str, torch.device]] = None):
-        super().__init__(output_transform, device)
-        self.counter = Counter()
-
-    def reset(self) -> None:
-        self.counter = Counter()
-
-    def update(self, output) -> None:
-        y_pred, y = output
-        self.counter.update(list(y_pred.flatten().cpu().numpy()))
-
-    def compute(self) -> Any:
-        total_count = sum(self.counter.values())
-        positive_count = self.counter[1]
-        return float(positive_count / total_count)
-
-class Variance(SimpleAccumulator):
-    def compute(self) -> Any:
-        return np.var(self.values)
-
-class Average(SimpleAccumulator):
-    def compute(self) -> Any:
-        return np.mean(self.values)
-
-class Minimum(SimpleAccumulator):
-    def compute(self) -> Any:
-        return np.min(self.values)
-
-class Maximum(SimpleAccumulator):
-    def compute(self) -> Any:
-        return np.max(self.values)
-
-class HistPlotter(SimpleAccumulator):
-    def __init__(self, visdom_logger, output_transform: Callable = lambda x: x, device: Optional[Union[str, torch.device]] = None):
-        super().__init__(output_transform, device)
-        self.visdom_logger = visdom_logger
-    def compute(self) -> Any:
-        self.visdom_logger.histogram(self.values)
-        return np.mean(self.values)
-
-class SimpleAggregate(Metric):
-    def __init__(self, base_metric, aggregate, output_transform: Callable = lambda x: x, device: Optional[Union[str, torch.device]] = None):
-        super().__init__(output_transform, device)
-        self.base_metric = base_metric
-        self.aggregate = aggregate
-        self.values = []
-
-    def reset(self) -> None:
-        # self.base_metric.reset()
-        #     self.values = []
-        pass
-    def update(self, output) -> None:
-        self.base_metric.update(output)
-
-    def compute(self) -> Any:
-        self.values.append(self.base_metric.compute())
-        return self.aggregate(self.values)
-
-
-def _binarize_softmax(y_pred):
-    sm = nn.Softmax(dim=1)(y_pred)
-    _, i = torch.max(sm, dim=1)
-    return i
-
-def binarize_softmax(output):
-    y_pred, y = output['y_pred'], output['y']
-    sm = nn.Softmax(dim=1)(y_pred)
-    _, i = torch.max(sm, dim=1)
-    # y_pred = i
-
-    y_pred = torch.nn.functional.one_hot(i,sm.shape[1])
-   # y = torch.nn.functional.one_hot(y,sm.shape[1])
-    return y_pred, y
-
-def _binarize_sigmoid(y_pred):
-    y_pred = nn.Sigmoid()(y_pred)
-    y_pred = torch.ge(y_pred, 0.5).int()
-    return y_pred
-
-def binarize_sigmoid(output):
-    y_pred, y = output['y_pred'], output['y']
-    y_pred = _binarize_sigmoid(y_pred)
-    return y_pred, y
 
 def create_bag_attention_trainer(
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
-    loss_fn: Union[Callable, torch.nn.Module],
+    att_specs,
     device: Optional[Union[str, torch.device]] = None,
     non_blocking: bool = False,
     prepare_batch: Callable = _prepare_batch,
@@ -171,16 +64,38 @@ def create_bag_attention_trainer(
         optimizer.zero_grad()
         x, y = prepare_batch(batch, device=device, non_blocking=non_blocking)
         y_pred, attention_outputs = model(x)
+
+        loss_dict = {}
+        for att_spec in att_specs:
+            name = att_spec.name
+            loss_fn = loss_mapping[att_spec.target_type]
+            # filter nan values in y
+            to_keep = ~torch.isnan(y[name])
+            _y = y[name][to_keep]
+            _y_pred = y_pred[name][to_keep]
+            # some batches might be entirely nan, skip these
+            if _y.nelement() > 0:
+                loss = loss_fn(_y_pred, _y)
+                loss_dict[name] = loss
+
+        # TODO parametrize
+        loss_weights = {'Age': 0.001, 'BMI': 0.001}
+
+        weighted_losses = dict([(k, loss_weights[k] * v) if k in loss_weights else (k,v) for k, v in loss_dict.items() ])
+
+        loss = sum(weighted_losses.values())
+        if loss > 0:
+            loss.backward()
+
+            if on_tpu:
+                xm.optimizer_step(optimizer, barrier=True)
+            else:
+                optimizer.step()
+        else:
+            loss = torch.tensor(0)
+
         # flatten the scores
         att_scores_flat = flatten_attention_scores(attention_outputs)
-
-        loss = loss_fn(y_pred, y)
-        loss.backward()
-
-        if on_tpu:
-            xm.optimizer_step(optimizer, barrier=True)
-        else:
-            optimizer.step()
 
         y_pred = {'preds': y_pred, 'atts': att_scores_flat}
         return output_transform(x, y, y_pred, loss)
@@ -188,6 +103,7 @@ def create_bag_attention_trainer(
     trainer = Engine(_update) if not deterministic else DeterministicEngine(_update)
 
     return trainer
+
 
 def flatten_attention_scores(attention_outputs):
     att_scores_flat = []
@@ -249,87 +165,6 @@ def create_bag_attention_evaluator(
             # flatten the scores
             att_scores_flat = flatten_attention_scores(attention_outputs)
             y_pred = {'preds': y_pred, 'atts': att_scores_flat}
-            return output_transform(x, y, y_pred)
-
-    evaluator = Engine(_inference)
-
-    for name, metric in metrics.items():
-        metric.attach(evaluator, name)
-
-    return evaluator
-
-def create_image_to_bag_evaluator(
-    model: torch.nn.Module,
-    metrics: Optional[Dict[str, Metric]] = None,
-    device: Optional[Union[str, torch.device]] = None,
-    non_blocking: bool = False,
-    prepare_batch: Callable = _prepare_batch,
-    output_transform: Callable = lambda x, y, y_pred: (y_pred, y),
-) -> Engine:
-    """
-    Factory function for creating an evaluator for supervised models.
-
-    Args:
-        model (`torch.nn.Module`): the model to train.
-        metrics (dict of str - :class:`~ignite.metrics.Metric`): a map of metric names to Metrics.
-        device (str, optional): device type specification (default: None).
-            Applies to batches after starting the engine. Model *will not* be moved.
-        non_blocking (bool, optional): if True and this copy is between CPU and GPU, the copy may occur asynchronously
-            with respect to the host. For other cases, this argument has no effect.
-        prepare_batch (callable, optional): function that receives `batch`, `device`, `non_blocking` and outputs
-            tuple of tensors `(batch_x, batch_y)`.
-        output_transform (callable, optional): function that receives 'x', 'y', 'y_pred' and returns value
-            to be assigned to engine's state.output after each iteration. Default is returning `(y_pred, y,)` which fits
-            output expected by metrics. If you change it you should use `output_transform` in metrics.
-
-    Note:
-        `engine.state.output` for this engine is defind by `output_transform` parameter and is
-        a tuple of `(batch_pred, batch_y)` by default.
-
-    .. warning::
-
-        The internal use of `device` has changed.
-        `device` will now *only* be used to move the input data to the correct device.
-        The `model` should be moved by the user before creating an optimizer.
-
-        For more information see:
-
-        * `PyTorch Documentation <https://pytorch.org/docs/stable/optim.html#constructing-it>`_
-        * `PyTorch's Explanation <https://github.com/pytorch/pytorch/issues/7844#issuecomment-503713840>`_
-
-    Returns:
-        Engine: an evaluator engine with supervised inference function.
-    """
-    metrics = metrics or {}
-
-    # todo adjust these dynamically based on the usage scenario
-    out_transform = _binarize_sigmoid
-    aggregate = lambda x: torch.mode(x, dim=0)[0]
-
-    def _aggregate_images_to_bag(bag_batch):
-        img_rep, n_images_per_bag = bag_batch
-        n_images_per_bag = tuple(n_images_per_bag.cpu().numpy())
-
-        # get the predictions for all images at the same time
-        preds = model(img_rep)
-
-        # split by patient
-        pwise_preds = torch.split(preds, n_images_per_bag)
-        final_preds = []
-        for preds in pwise_preds:
-            # perform the output transform to get labels
-            transformed_preds = out_transform(preds)
-            final_pred = aggregate(transformed_preds)
-            final_preds.append(final_pred)
-
-        y_pred = torch.stack(final_preds)
-        return y_pred
-
-    def _inference(engine: Engine, batch: Sequence[torch.Tensor]) -> Union[Any, Tuple[torch.Tensor]]:
-        model.eval()
-        with torch.no_grad():
-            x, y = prepare_batch(batch, device=device, non_blocking=non_blocking)
-            y_pred = _aggregate_images_to_bag(x)
             return output_transform(x, y, y_pred)
 
     evaluator = Engine(_inference)

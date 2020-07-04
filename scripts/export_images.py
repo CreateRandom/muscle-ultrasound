@@ -10,8 +10,8 @@ if __name__ == '__main__':
     set_spec_dict = get_default_set_spec_dict()
     set_spec_name = 'ESAOTE_6100_train'
     set_spec = set_spec_dict[set_spec_name]
-    images = get_data_for_spec(set_spec, loader_type='image', attribute='Image',
-                                 muscles_to_use=None)
+    images = get_data_for_spec(set_spec, loader_type='image', attribute_to_filter='Image',
+                               muscles_to_use=None)
     images = images[0:16]
     mnt_path = get_mnt_path()
     export_path = os.path.join(mnt_path, 'klaus', 'standard_format', set_spec_name)

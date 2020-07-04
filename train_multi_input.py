@@ -1,32 +1,25 @@
-import random
-
-from sklearn.metrics import mean_absolute_error, accuracy_score
-from torch.nn import BCEWithLogitsLoss, MSELoss, CrossEntropyLoss
-
-from loading.datasets import CustomLabelEncoder
-from loading.loaders import make_bag_loader, \
-    SetSpec, get_data_for_spec, make_image_loader, get_classes
+from loading.datasets import problem_kind, make_att_specs
+from loading.loaders import make_bag_loader, get_data_for_spec, get_classes
 from loading.loading_utils import make_set_specs
-from models.multi_input import MultiInputNet, cnn_constructors, MultiInputBaseline
+from models.multi_input import MultiInputNet
 import os
 import socket
 
 import torch
 from torch import optim
 
-from ignite.engine import Events, create_supervised_trainer, create_supervised_evaluator
-from ignite.metrics import Accuracy, Loss, Precision, Recall, MeanAbsoluteError, MetricsLambda, ConfusionMatrix
+from ignite.engine import Events
 from ignite.contrib.handlers import ProgressBar
 from ignite.handlers import global_step_from_engine
-import numpy as np
-from sklearn.dummy import DummyClassifier, DummyRegressor
-from training_utils import problem_kind, fix_seed, problem_legal_values
+
+from training_utils import fix_seed
 # import logging
 from ignite.contrib.handlers.neptune_logger import NeptuneLogger, OutputHandler, WeightsScalarHandler, \
     GradsScalarHandler
 
-from utils.ignite_utils import PositiveShare, Variance, Average, binarize_softmax, binarize_sigmoid, \
-    pytorch_count_params, create_bag_attention_trainer, create_bag_attention_evaluator, Minimum, Maximum
+from utils.ignite_utils import create_bag_attention_trainer, create_bag_attention_evaluator
+from utils.utils import pytorch_count_params
+from utils.metric_utils import obtain_metrics, Variance, Average, Minimum, Maximum
 from utils.tokens import NEPTUNE_API_TOKEN
 
 def train_multi_input(config):
@@ -126,8 +119,28 @@ def train_multi_input(config):
     jhu_data_path = os.path.join(mnt_path, 'klaus/myositis/')
     jhu_img_root = os.path.join(mnt_path, 'klaus/myositis/processed_imgs')
 
-    # yields a mapping from names to set_specs
-    set_spec_dict = make_set_specs(umc_data_path, umc_img_root, jhu_data_path, jhu_img_root)
+    # additional prediction targets
+    additional_atts = ['Age'] #['Age']
+    # whether to drop all patients that have no value for the main attribute
+    drop_na_main_attribute_values = False
+
+    attribute_specs = []
+    # yields all possible attributes to predict
+    att_spec_dict = make_att_specs()
+    all_atts = [attribute] + additional_atts
+    for attribute_name in all_atts:
+        attribute_specs.append(att_spec_dict[attribute_name])
+
+    # the classes we predict
+    train_classes = att_spec_dict[attribute].legal_values
+    # whether or not to drop all patients with na values depends on single vs multi-head
+    multihead = bool(additional_atts)
+    # listen to user specified input in case it is multihead, else, always drop na values
+    dropna_values = drop_na_main_attribute_values if multihead else True
+
+    # TODO only change this for val and test?
+    filter_attribute = 'Class_sample' if attribute == 'Class' else None
+
     # this is always needed
     source_train = config.get('source_train')
     target_train = config.get('target_train', None)
@@ -136,6 +149,9 @@ def train_multi_input(config):
     # 'target_train': SetSpec('Philips_iU22', 'umc', 'train', umc_data_path)
     desired_set_specs = {'source_train': source_train, 'target_train' : target_train,
                          'val': val} # 'GE_Logiq_E_im_muscle_chart']}
+
+    # yields a mapping from names to set_specs
+    set_spec_dict = make_set_specs(umc_data_path, umc_img_root, jhu_data_path, jhu_img_root)
 
     # resolve the set names to set_specs
     resolved_set_specs = {}
@@ -155,8 +171,6 @@ def train_multi_input(config):
     desired_set_specs = resolved_set_specs
 
     set_loaders = {}
-    label_encoder = None
-    train_classes = problem_legal_values[attribute] if attribute in problem_legal_values else None
     muscles_to_use = None
     use_most_frequent_muscles = config.get('muscle_subset', False)
     if use_most_frequent_muscles:
@@ -168,12 +182,14 @@ def train_multi_input(config):
         bag_loaders = []
         for set_spec in set_spec_list:
             print(set_spec)
-            filter_attribute = 'Class_sample' if attribute == 'Class' else None
-
+            # always drop na values for the validation or test set
+            dropna_values_set = dropna_values if (set_name == 'train') else True
             # pass the classes in to ensure that only those are present in all the sets
-            patients = get_data_for_spec(set_spec, loader_type='bag', attribute=attribute,
-                                     class_values=train_classes,
-                                     muscles_to_use=muscles_to_use, filter_attribute=filter_attribute)
+            patients = get_data_for_spec(set_spec, loader_type='bag', attribute_to_filter=attribute,
+                                         legal_attribute_values=train_classes,
+                                         muscles_to_use=muscles_to_use, boolean_subset_attribute=filter_attribute,
+                                         dropna_values=dropna_values_set)
+
            # patients = patients[0:10]
             print(f'Loaded {len(patients)} elements.')
 
@@ -182,77 +198,37 @@ def train_multi_input(config):
                 # if not specified yet, get all classes from the training set
                 if not train_classes:
                     train_classes = get_classes(patients, attribute)
-                print(train_classes)
-                label_encoder = CustomLabelEncoder(train_classes, one_hot_encode=False)
-            print(get_classes(patients, attribute))
+
             img_path = set_spec.img_root_path
-            # decide which type of loader we need here
-            # always make the bag loader
+
             use_pseudopatient_locally = (set_name != 'val') & use_pseudopatients
             loader = make_bag_loader(patients, img_path, use_one_channel, normalizer_name,
-                                     attribute, batch_size, set_spec.device, limit_image_size=limit_image_size,
+                                     attribute_specs, batch_size, set_spec.device, limit_image_size=limit_image_size,
                                      use_pseudopatients=use_pseudopatient_locally,
-                                     label_encoder=label_encoder, pin_memory=use_cuda)
+                                     pin_memory=use_cuda, return_attribute_dict=True)
             bag_loaders.append(loader)
 
 
         set_loaders[set_name] = bag_loaders
 
-    # output dimensionality of the network
-    if train_classes and (len(train_classes) > 2):
-        num_classes = len(train_classes)
-    # regression or binary classification with sigmoid
-    else:
-        num_classes = 1
-
-    # obtain baseline performance estimates
-
-    print('Baseline scores')
-    train_labels = set_loaders['source_train'][0].dataset.get_all_labels()
-    if is_classification:
-        d = DummyClassifier(strategy='most_frequent')
-        scorer = accuracy_score
-    else:
-        d = DummyRegressor(strategy='mean')
-        scorer = mean_absolute_error
-    d.fit([0] * len(train_labels), train_labels)
-    train_preds = d.predict([0] * len(train_labels))
-    score = scorer(train_labels, train_preds)
-    print(f'Naive score on training set: {score}')
-
-    for val_loader in set_loaders['val']:
-        val_labels = val_loader.dataset.get_all_labels()
-        val_preds = d.predict([0] * len(val_labels))
-        score = scorer(val_labels, val_preds)
-        print(f'Naive score on validation set: {score}')
-
     # create the desired model
-    model = MultiInputNet(backend=backend, mil_pooling=mil_pooling,
+    model = MultiInputNet(attribute_specs, backend=backend, mil_pooling=mil_pooling,
                       pooling_kwargs=pooling_kwargs,
-                      mode=mil_mode, out_dim=num_classes,
+                      mode=mil_mode,
                       fc_hidden_layers=fc_hidden_layers, fc_use_bn=fc_use_bn,
                       backend_cutoff=backend_cutoff,
                       backend_kwargs=backend_kwargs)
 
     n_params_backend = pytorch_count_params(model.backend)
-    n_params_classifier = pytorch_count_params(model.classifier)
+    n_params_classifier = pytorch_count_params(model.heads[attribute])
     n_params_pooling = pytorch_count_params(model.mil_pooling)
     config['n_params_classifier'] = n_params_classifier
     config['n_params_pooling'] = n_params_pooling
 
-    # can specify different learning rates for each component!
-    optimizer = optim.Adam([{'params': model.backend.parameters(), 'lr': backend_lr},
-                            {'params': model.classifier.parameters(), 'lr': lr}], lr)
+    # can specify different learning rates for each component
+    optimizer = optim.Adam([{'params': model.backend.parameters(), 'lr': backend_lr}], lr)
 
     config['n_params_backend'] = n_params_backend
-
-    if is_classification:
-        if num_classes == 1:
-            criterion = BCEWithLogitsLoss()  # BernoulliLoss
-        else:
-            criterion = CrossEntropyLoss()
-    else:
-        criterion = MSELoss()
 
     device = torch.device("cuda:0" if use_cuda else "cpu")
     # needs to be manually enforced to work on the cluster
@@ -269,13 +245,11 @@ def train_multi_input(config):
         }
 
 
-    trainer = create_bag_attention_trainer(model, optimizer, criterion,
+    trainer = create_bag_attention_trainer(model, optimizer, attribute_specs,
                                            device=device, output_transform=custom_output_transform,
                                            deterministic=True)
 
-
-    # always log the loss
-    metrics = {'loss': Loss(criterion, output_transform=lambda x: (x['y_pred'], x['y']))}
+    metrics = obtain_metrics(attribute_specs=attribute_specs, extract_multiple_atts=True)
 
     # logging attention distributions
     log_attention = mil_pooling == 'attention'
@@ -285,33 +259,6 @@ def train_multi_input(config):
                           'min_att': Minimum(output_transform=lambda output: output['atts']),
                           'max_att': Maximum(output_transform=lambda output: output['atts'])}
         metrics = {**metrics, **metrics_to_add}
-    # binary cases
-    if is_classification & (num_classes == 1):
-        metrics_to_add = {'accuracy': Accuracy(output_transform=binarize_sigmoid),
-                          'p': Precision(output_transform=binarize_sigmoid),
-                          'r': Recall(output_transform=binarize_sigmoid),
-                          'pos_share': PositiveShare(output_transform=binarize_sigmoid)
-                          }
-    # non-binary case
-    elif is_classification:
-        p = Precision(output_transform=binarize_softmax, average=False)
-        r = Recall(output_transform=binarize_softmax, average=False)
-        F1 = p * r * 2 / (p + r + 1e-20)
-        F1 = MetricsLambda(lambda t: torch.mean(t).item(), F1)
-
-        metrics_to_add = {'accuracy': Accuracy(output_transform=binarize_softmax),
-                          'ap': Precision(output_transform=binarize_softmax, average=True),
-                          'ar': Recall(output_transform=binarize_softmax, average=True),
-                          'f1': F1,
-                          'cm': ConfusionMatrix(output_transform=binarize_softmax, num_classes=num_classes)
-                          }
-
-    else:
-        metrics_to_add = {'mae': MeanAbsoluteError(),
-                          'mean': Average(output_transform=lambda output: output['y_pred']),
-                          'var': Variance(output_transform=lambda output: output['y_pred'])}
-
-    metrics = {**metrics, **metrics_to_add}
 
     # attach metrics to the trainer
     for set_spec, metric in metrics.items():

@@ -1,8 +1,5 @@
-from sklearn.metrics import mean_absolute_error, accuracy_score
-from torch.nn import BCEWithLogitsLoss, MSELoss, CrossEntropyLoss
-
-from training_utils import problem_kind, fix_seed, problem_legal_values
-from loading.datasets import CustomLabelEncoder
+from training_utils import fix_seed
+from loading.datasets import problem_kind, make_att_specs
 from loading.loaders import make_bag_loader, \
     get_data_for_spec, make_image_loader, get_classes
 from loading.loading_utils import make_set_specs
@@ -14,17 +11,16 @@ import torch
 from torch import optim
 
 from ignite.engine import Events, create_supervised_trainer, create_supervised_evaluator
-from ignite.metrics import Accuracy, Loss, Precision, Recall, MeanAbsoluteError, MetricsLambda, ConfusionMatrix
+from ignite.metrics import Accuracy, Precision, Recall, MeanAbsoluteError
 from ignite.contrib.handlers import ProgressBar
 from ignite.handlers import global_step_from_engine
-from sklearn.dummy import DummyClassifier, DummyRegressor
 
 # import logging
 from ignite.contrib.handlers.neptune_logger import NeptuneLogger, OutputHandler, WeightsScalarHandler, \
     GradsScalarHandler
 
-from utils.ignite_utils import PositiveShare, Variance, Average, binarize_softmax, binarize_sigmoid, \
-    pytorch_count_params, create_image_to_bag_evaluator
+from utils.utils import pytorch_count_params
+from utils.metric_utils import obtain_metrics, PositiveShare, Variance, Average, loss_mapping
 from utils.tokens import NEPTUNE_API_TOKEN
 
 
@@ -65,6 +61,9 @@ def train_image_level(config):
 
     if attribute not in problem_kind:
         raise ValueError(f'Unknown attribute {attribute}')
+    att_spec_dict = make_att_specs()
+    attribute_specs = [att_spec_dict[attribute]]
+
     label_type = problem_kind[attribute]
     is_classification = (label_type == 'multi' or (label_type == 'binary'))
     is_multi = (label_type == 'multi')
@@ -144,8 +143,10 @@ def train_image_level(config):
     set_loaders = {}
     set_loaders['bag'] = {}
     set_loaders['image'] = {}
-    label_encoder = None
-    train_classes = problem_legal_values[attribute] if attribute in problem_legal_values else None
+
+    train_classes = att_spec_dict[attribute].legal_values
+    filter_attribute = 'Class_sample' if attribute == 'Class' else None
+
     muscles_to_use = None
     use_most_frequent_muscles = config.get('muscle_subset', False)
     if use_most_frequent_muscles:
@@ -158,12 +159,14 @@ def train_image_level(config):
         image_loaders = []
         for set_spec in set_spec_list:
             print(set_spec)
-            filter_attribute = 'Class_sample' if attribute == 'Class' else None
+
 
             # pass the classes in to ensure that only those are present in all the sets
-            patients = get_data_for_spec(set_spec, loader_type='bag', attribute=attribute,
-                                         class_values=train_classes,
-                                         muscles_to_use=muscles_to_use, filter_attribute=filter_attribute)
+            patients = get_data_for_spec(set_spec, loader_type='bag', attribute_to_filter=attribute,
+                                         legal_attribute_values=train_classes,
+                                         muscles_to_use=muscles_to_use, boolean_subset_attribute=filter_attribute,
+                                         dropna_values=True)
+            patients = patients[0:10]
             print(f'Loaded {len(patients)} elements.')
 
             # if classification and this is the train set, we want to fit the label encoder on this
@@ -172,23 +175,26 @@ def train_image_level(config):
                 if not train_classes:
                     train_classes = get_classes(patients, attribute)
                 print(train_classes)
-                label_encoder = CustomLabelEncoder(train_classes, one_hot_encode=False)
             img_path = set_spec.img_root_path
 
             # make the bag loader
             loader = make_bag_loader(patients, img_path, use_one_channel, normalizer_name,
-                                     attribute, patient_batch_size, set_spec.device, limit_image_size=limit_image_size,
-                                     use_pseudopatients=False,
-                                     label_encoder=label_encoder, pin_memory=use_cuda)
+                                     attribute_specs, patient_batch_size, set_spec.device, limit_image_size=limit_image_size,
+                                     use_pseudopatients=False, return_attribute_dict= False,
+                                     pin_memory=use_cuda)
             bag_loaders.append(loader)
 
             # make the image loader
-            images = get_data_for_spec(set_spec, loader_type='image', attribute=attribute,
-                                       class_values=train_classes,
-                                       muscles_to_use=muscles_to_use, filter_attribute=filter_attribute)
+            images = get_data_for_spec(set_spec, loader_type='image', attribute_to_filter=attribute,
+                                       legal_attribute_values=train_classes,
+                                       muscles_to_use=muscles_to_use, boolean_subset_attribute=filter_attribute,
+                                       dropna_values=True)
+
+            images = images[0:100]
+            
             image_loader = make_image_loader(images, img_path, use_one_channel, normalizer_name,
-                                             attribute, batch_size, set_spec.device, limit_image_size=limit_image_size,
-                                             label_encoder=label_encoder, pin_memory=use_cuda, is_multi=is_multi)
+                                             attribute_specs, batch_size, set_spec.device, limit_image_size=limit_image_size,
+                                             pin_memory=use_cuda, is_multi=is_multi, return_multiple_atts= False)
             image_loaders.append(image_loader)
 
         set_loaders['bag'][set_name] = bag_loaders
@@ -200,27 +206,6 @@ def train_image_level(config):
     # regression or binary classification with sigmoid
     else:
         num_classes = 1
-
-    # obtain baseline performance estimates
-
-    print('Baseline scores')
-    train_labels = set_loaders['bag']['source_train'][0].dataset.get_all_labels()
-    if is_classification:
-        d = DummyClassifier(strategy='most_frequent')
-        scorer = accuracy_score
-    else:
-        d = DummyRegressor(strategy='mean')
-        scorer = mean_absolute_error
-    d.fit([0] * len(train_labels), train_labels)
-    train_preds = d.predict([0] * len(train_labels))
-    score = scorer(train_labels, train_preds)
-    print(score)
-
-    for val_loader in set_loaders['bag']['val']:
-        val_labels = val_loader.dataset.get_all_labels()
-        val_preds = d.predict([0] * len(val_labels))
-        score = scorer(val_labels, val_preds)
-        print(score)
 
     # get the right cnn
     backend_func = cnn_constructors[backend]
@@ -236,13 +221,7 @@ def train_image_level(config):
 
     config['n_params_backend'] = n_params_backend
 
-    if is_classification:
-        if num_classes == 1:
-            criterion = BCEWithLogitsLoss()  # BernoulliLoss
-        else:
-            criterion = CrossEntropyLoss()
-    else:
-        criterion = MSELoss()
+    criterion = loss_mapping[att_spec_dict[attribute].target_type]
 
     device = torch.device("cuda:0" if use_cuda else "cpu")
     # needs to be manually enforced to work on the cluster
@@ -262,36 +241,7 @@ def train_image_level(config):
                                         device=device, output_transform=custom_output_transform,
                                         deterministic=True)
 
-    # always log the loss
-    metrics = {'loss': Loss(criterion, output_transform=lambda x: (x['y_pred'], x['y']))}
-
-    # binary cases
-    if is_classification & (num_classes == 1):
-        metrics_to_add = {'accuracy': Accuracy(output_transform=binarize_sigmoid),
-                          'p': Precision(output_transform=binarize_sigmoid),
-                          'r': Recall(output_transform=binarize_sigmoid),
-                          'pos_share': PositiveShare(output_transform=binarize_sigmoid),
-                          }
-    # non-binary case
-    elif is_classification:
-        p = Precision(output_transform=binarize_softmax, average=False)
-        r = Recall(output_transform=binarize_softmax, average=False)
-        F1 = p * r * 2 / (p + r + 1e-20)
-        F1 = MetricsLambda(lambda t: torch.mean(t).item(), F1)
-
-        metrics_to_add = {'accuracy': Accuracy(output_transform=binarize_softmax),
-                          'ap': Precision(output_transform=binarize_softmax, average=True),
-                          'ar': Recall(output_transform=binarize_softmax, average=True),
-                          'f1': F1,
-                          'cm': ConfusionMatrix(output_transform=binarize_softmax, num_classes=num_classes)
-                          }
-
-    else:
-        metrics_to_add = {'mae': MeanAbsoluteError(),
-                          'mean': Average(output_transform=lambda output: output['y_pred']),
-                          'var': Variance(output_transform=lambda output: output['y_pred'])}
-
-    metrics = {**metrics, **metrics_to_add}
+    metrics = obtain_metrics(attribute_specs, extract_multiple_atts=False)
 
     # attach metrics to the trainer
     for set_spec, metric in metrics.items():
@@ -350,35 +300,30 @@ def train_image_level(config):
 
     # add patient level baseline evaluators for the image level
 
+    bag_metric_mapping = {
+        'regression': [('mae', MeanAbsoluteError, None, {}),
+                       ('mean', Average, lambda output: output['y_pred'], {}),
+                       ('var', Variance, lambda output: output['y_pred'], {})],
+
+        'binary': [('accuracy', Accuracy, None, {}),
+                   ('p', Precision, None, {}),
+                   ('r', Recall, None, {}),
+                   ('pos_share', PositiveShare, None, {})],
+
+        'multi': [
+            ('accuracy', Accuracy, None, {}),
+            ('ap', Precision, None, {'average': True}),
+            ('ar', Recall, None, {'average': True})
+        ]
+    }
+
+    bag_level_metrics = obtain_metrics(attribute_specs, extract_multiple_atts=False, metric_mapping=bag_metric_mapping,
+                                       add_loss=False)
+
     val_loaders_bag = set_loaders['bag']['val']
     val_evaluators_bag = []
     for set_spec, loader in zip(val_names, val_loaders_bag):
-
-        if is_classification & (num_classes == 1):
-            metrics_to_add = {'accuracy': Accuracy(),
-                              'p': Precision(),
-                              'r': Recall(),
-                              'pos_share': PositiveShare()
-                              }
-        elif is_classification:
-            p = Precision(average=False)
-            r = Recall(average=False)
-            F1 = p * r * 2 / (p + r + 1e-20)
-            F1 = MetricsLambda(lambda t: torch.mean(t).item(), F1)
-
-            metrics_to_add = {'accuracy': Accuracy(),
-                              'ap': Precision(average=True),
-                              'ar': Recall( average=True),
-                              'f1': F1,
-                              'cm': ConfusionMatrix(num_classes=num_classes)
-                              }
-
-        else:
-            metrics_to_add = {'mae': MeanAbsoluteError(),
-                              'mean': Average(output_transform=lambda output: output['y_pred']),
-                              'var': Variance(output_transform=lambda output: output['y_pred'])}
-
-        val_evaluator = create_supervised_evaluator(patient_eval, metrics=metrics_to_add, device=device,
+        val_evaluator = create_supervised_evaluator(patient_eval, metrics=bag_level_metrics, device=device,
                                                     output_transform=custom_output_transform_eval)
 
         # val_evaluator = create_image_to_bag_evaluator(model, metrics=metrics_to_add, device=device,
@@ -386,7 +331,7 @@ def train_image_level(config):
         # enable validation logging
         npt_logger.attach(val_evaluator,
                           log_handler=OutputHandler(tag=str(set_spec),
-                                                    metric_names=list(metrics_to_add.keys()),
+                                                    metric_names=list(bag_level_metrics.keys()),
                                                     global_step_transform=global_step_from_engine(trainer)),
                           event_name=Events.EPOCH_COMPLETED)
         val_evaluators_bag.append(val_evaluator)
@@ -436,7 +381,7 @@ def train_image_level(config):
 
 
 if __name__ == '__main__':
-    config = {'prediction_target': 'Sex', 'backend_mode': 'finetune',
+    config = {'prediction_target': 'Class', 'backend_mode': 'finetune',
               'backend': 'resnet-18', 'batch_size': 32, 'lr': 0.0269311, 'n_epochs': 5}
 
     esoate_train = {'source_train': 'ESAOTE_6100_train',

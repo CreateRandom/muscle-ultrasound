@@ -33,3 +33,9 @@ def compute_normalization_parameters(dataset, n_channels):
     mean.div_(len(dataset))
     std.div_(len(dataset))
     return mean, std
+
+
+def pytorch_count_params(model):
+  "count number trainable parameters in a pytorch model"
+  total_params = sum(reduce( lambda a, b: a*b, x.size()) for x in model.parameters())
+  return total_params

@@ -1,5 +1,8 @@
+from dataclasses import dataclass
 from functools import partial
+from typing import List, Any
 
+import pandas
 from torch import is_tensor
 import os
 from torch.utils.data import Dataset
@@ -15,17 +18,22 @@ import torch
 
 class SingleImageDataset(Dataset):
     # for the use case where we want to classify single images
-    def __init__(self, image_frame, root_dir, attribute='Diagnosis', image_column='ImagePath', transform=None,
-                 use_one_channel=False, use_mask=False, label_encoder=None):
+    def __init__(self, image_frame, root_dir, attribute_specs, return_attribute_dict=False, image_column='ImagePath', transform=None,
+                 use_one_channel=False, use_mask=False):
         """
         Args:
             image_frame (DataFrame): DataFrame containing image information
             root_dir (string): Directory with all the images.
             attribute (string): The attribute to output. Default: Diagnosis.
         """
+        # should return only one, but specified multiple --> error
+        # should return multiple, but specified only one --> no error
+        if ~return_attribute_dict & (len(attribute_specs) > 1):
+            raise ValueError(f'Was asked to return single attribute, but found {len(attribute_specs)}')
+
         self.image_frame = image_frame
         self.root_dir = root_dir
-        self.attribute = attribute
+      #  self.attribute = attribute
 
         self.transform = transform
         self.use_one_channel = use_one_channel
@@ -34,16 +42,18 @@ class SingleImageDataset(Dataset):
 
         self.one_hot_encode_binary = False
 
-        self.label_encoder = label_encoder
+      #  self.label_encoder = label_encoder
+        self.attribute_specs = attribute_specs
+        self.return_attribute_dict = return_attribute_dict
 
     def __len__(self):
         return len(self.image_frame)
 
-    def get_all_labels(self):
-        labels = self.image_frame[self.attribute]
-        if self.label_encoder:
-            labels = [self.label_encoder.get_classification_label(l) for l in labels]
-        return labels
+    # def get_all_labels(self):
+    #     labels = self.image_frame[self.attribute]
+    #     if self.label_encoder:
+    #         labels = [self.label_encoder.get_classification_label(l) for l in labels]
+    #     return labels
 
     def __getitem__(self, idx):
         if is_tensor(idx):
@@ -56,13 +66,24 @@ class SingleImageDataset(Dataset):
                             use_mask=self.use_mask)
         image = load_func(img_name)
 
-        attribute_label = sample[self.attribute]
-        if self.label_encoder:
-            attribute_label = self.label_encoder.get_classification_label(attribute_label)
+        attribute_dict = {}
+        for attribute_spec in self.attribute_specs:
+            attribute_label = sample[attribute_spec.name]
+            if attribute_spec.target_type != 'regression' and not pandas.isnull(attribute_label):
+                attribute_label = attribute_spec.encoder.get_classification_label(attribute_label)
+            attribute_dict[attribute_spec.name] = attribute_label
+
+        # attribute_label = sample[self.attribute]
+        # if self.label_encoder:
+        #     attribute_label = self.label_encoder.get_classification_label(attribute_label)
 
         if self.transform:
             image = self.transform(image)
-        return image, attribute_label
+
+        if self.return_attribute_dict:
+            return image, attribute_dict  # [attribute_label]
+        else:
+            return image, list(attribute_dict.values())[0]
 
 
 class CustomLabelEncoder(object):
@@ -76,6 +97,8 @@ class CustomLabelEncoder(object):
             self.classes = self.classes + ['dummy_label']
 
     def get_classification_label(self, attribute_label):
+        if attribute_label not in self.classes:
+            raise ValueError(f'Found illegal label {attribute_label}')
         transformed_label = label_binarize([attribute_label], classes=self.classes)
         if 'dummy_label' in self.classes:
             # drop the last column for the dummy class
@@ -98,10 +121,17 @@ def select_latest(patient):
 
 class PatientBagDataset(Dataset):
     def __init__(self, patient_list, root_dir,
-                 use_pseudopatients, muscles_to_use=None,
-                 attribute='Diagnosis', image_column='ImagePath', transform=None, use_one_channel=True,
+                 use_pseudopatients, attribute_specs, return_attribute_dict=False, muscles_to_use=None,
+                 image_column='ImagePath', transform=None, use_one_channel=True,
                  use_mask=False, stack_images=True, n_images_per_channel=1,
-                 merge_left_right=False, label_encoder=None):
+                 merge_left_right=False):
+
+        # should return only one, but specified multiple --> error
+        # should return multiple, but specified only one --> no error
+        if ~return_attribute_dict & (len(attribute_specs) > 1):
+            raise ValueError(f'Was asked to return single attribute, but found {len(attribute_specs)}')
+
+        self.return_attribute_dict = return_attribute_dict
         self.muscles_to_use = muscles_to_use
 
         # a policy for record selection, TODO allow modification
@@ -120,10 +150,12 @@ class PatientBagDataset(Dataset):
             self.patients = pp_list
             print(f'Pseudopatients yielded a total of {len(self.patients)} patients.')
         self.root_dir = root_dir
-        self.attribute = attribute
+       # self.attribute = attribute
 
-        self.one_hot_encode_binary = False
-        self.label_encoder = label_encoder
+       #   self.one_hot_encode_binary = False
+       #  self.label_encoder = label_encoder
+
+        self.attribute_specs = attribute_specs #make_att_specs()
 
         self.transform = transform
         self.use_one_channel = use_one_channel
@@ -139,11 +171,11 @@ class PatientBagDataset(Dataset):
         else:
             self.grouper = ['Muscle', 'Side']
 
-    def get_all_labels(self):
-        labels = [patient.attributes[self.attribute] for patient in self.patients]
-        if self.label_encoder:
-            labels = [self.label_encoder.get_classification_label(l) for l in labels]
-        return labels
+    # def get_all_labels(self):
+    #     labels = [patient.attributes[self.attribute] for patient in self.patients]
+    #     if self.label_encoder:
+    #         labels = [self.label_encoder.get_classification_label(l) for l in labels]
+    #     return labels
 
     def get_total_number_of_images(self):
         total_count = 0
@@ -182,12 +214,28 @@ class PatientBagDataset(Dataset):
         if self.stack_images:
             imgs = torch.stack(imgs)
 
-        attribute_label = patient.attributes[self.attribute]
-        # transform into classes if so desired
-        if self.label_encoder:
-            attribute_label = self.label_encoder.get_classification_label(attribute_label=attribute_label)
+        attribute_dict = {}
+        for attribute_spec in self.attribute_specs:
+            if attribute_spec.source == 'patient':
+                attribute_label = patient.attributes[attribute_spec.name]
+            elif attribute_spec.source == 'record':
+                attribute_label = sample.meta_info[attribute_spec.name]
+            else:
+                continue
 
-        return imgs, [attribute_label]
+            if attribute_spec.target_type != 'regression' and not pandas.isnull(attribute_label):
+                attribute_label = attribute_spec.encoder.get_classification_label(attribute_label)
+            attribute_dict[attribute_spec.name] = attribute_label
+
+        # attribute_label = patient.attributes[self.attribute]
+        # # transform into classes if so desired
+        # if self.label_encoder:
+        #     attribute_label = self.label_encoder.get_classification_label(attribute_label=attribute_label)
+
+        if self.return_attribute_dict:
+            return imgs, attribute_dict#[attribute_label]
+        else:
+            return imgs, list(attribute_dict.values())[0]
 
     def __len__(self):
         return len(self.patients)
@@ -282,4 +330,38 @@ def make_pseudorecords(record, muscles=None, method='each_once', n_limit=100):
 
     return pseudorecords
 
+class AttributeSpec:
 
+    def __init__(self, name, source, target_type, legal_values=None) -> None:
+        super().__init__()
+        self.name = name
+        self.source = source
+        self.target_type = target_type
+        self.encoder = None
+        if legal_values:
+            self.legal_values = legal_values
+            self.encoder = CustomLabelEncoder(self.legal_values, one_hot_encode=False)
+
+
+
+problem_kind = {'Sex': 'binary', 'Age': 'regression', 'BMI': 'regression',
+            'Class': 'binary'} # 'Muscle': 'multi',
+
+problem_source = {'Sex': 'patient', 'Age': 'record', 'BMI': 'record',
+            'Class': 'patient'} # 'Muscle': 'image'
+
+problem_legal_values = {'Class': ['NMD', 'no NMD'], 'Sex': ['M', 'F']}
+
+
+def make_att_specs():
+    att_spec_dict = {}
+    for name, target_type in problem_kind.items():
+        legal_values = None
+        if name in problem_legal_values:
+            legal_values = problem_legal_values[name]
+        source = problem_source[name]
+
+        a = AttributeSpec(name,source =source, target_type=target_type, legal_values=legal_values)
+        att_spec_dict[name] = a
+
+    return att_spec_dict

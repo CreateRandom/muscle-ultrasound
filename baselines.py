@@ -9,10 +9,9 @@ from scipy import stats
 from sklearn.dummy import DummyClassifier, DummyRegressor
 from sklearn.linear_model import LinearRegression
 import pandas as pd
-from loading.datasets import PatientRecord
+from loading.datasets import PatientRecord, problem_kind, problem_legal_values
 from loading.loaders import get_data_for_spec
 from loading.loading_utils import make_set_specs
-from training_utils import problem_legal_values, problem_kind
 
 from sklearn.metrics import mean_absolute_error, accuracy_score, classification_report
 
@@ -150,9 +149,9 @@ def run_dummy_baseline(set_name, attribute):
     set_spec = set_spec_dict[set_name]
     filter_attribute = 'Class_sample' if attribute == 'Class' else None
     class_values = problem_legal_values[attribute] if attribute in problem_legal_values else None
-    patients = get_data_for_spec(set_spec, loader_type='bag', attribute=attribute,
-                                 class_values=class_values,
-                                 muscles_to_use=None, filter_attribute=filter_attribute)
+    patients = get_data_for_spec(set_spec, loader_type='bag', attribute_to_filter=attribute,
+                                 legal_attribute_values=class_values,
+                                 muscles_to_use=None, boolean_subset_attribute=filter_attribute)
 
     y_true = [patient.attributes[attribute] for patient in patients]
 
@@ -174,9 +173,9 @@ def run_dummy_baseline(set_name, attribute):
 def run_rule_based_baseline(set_name):
     set_spec_dict = get_default_set_spec_dict()
     set_spec = set_spec_dict[set_name]
-    patients = get_data_for_spec(set_spec, loader_type='bag', attribute='Class',
-                                 class_values=problem_legal_values['Class'],
-                                 muscles_to_use=None, filter_attribute='Class_sample')
+    patients = get_data_for_spec(set_spec, loader_type='bag', attribute_to_filter='Class',
+                                 legal_attribute_values=problem_legal_values['Class'],
+                                 muscles_to_use=None, boolean_subset_attribute='Class_sample')
 
     # patients = get_data_for_spec(set_spec, loader_type='bag', attribute='Sex',
     #                               muscles_to_use=None)
@@ -340,7 +339,7 @@ def analyze_multi_device_patients():
     all_patients = []
     for key, value in set_spec_dict.items():
         if key.startswith('Multiple'):
-            patients = get_data_for_spec(value, loader_type='bag', attribute='Sex',
+            patients = get_data_for_spec(value, loader_type='bag', attribute_to_filter=None,
                                          muscles_to_use=None)
             all_patients.extend(patients)
 
@@ -402,6 +401,6 @@ def align_records(record_a, record_b):
 
 
 if __name__ == '__main__':
-  #  analyze_multi_device_patients()
+    analyze_multi_device_patients()
     run_rule_based_baseline('ESAOTE_6100_val')
     run_dummy_baseline('ESAOTE_6100_val', 'Sex')

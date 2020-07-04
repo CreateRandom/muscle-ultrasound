@@ -3,6 +3,7 @@ import os
 from dataclasses import dataclass
 from typing import List, Union
 
+import numpy
 import pandas as pd
 import torch
 from torch.utils.data import DataLoader
@@ -11,9 +12,8 @@ from torchvision import transforms
 from torchvision.transforms import transforms, CenterCrop, Resize
 
 from loading.datasets import PatientBagDataset, SingleImageDataset, \
-    PatientRecord, Patient
+    PatientRecord, Patient, AttributeSpec
 from loading.img_utils import FixedHeightCrop
-from utils.utils import compute_normalization_parameters
 
 
 def load_myositis_images(csv_path, muscles_to_use=None) -> pd.DataFrame:
@@ -87,8 +87,9 @@ def make_basic_transform(resize_option_name, normalizer_name=None, to_tensor=Tru
     return transforms.Compose(t_list)
 
 
-def umc_to_image_frame(patient_path, record_path, image_path, attribute_to_use=None,
-                       muscles_to_use=None, class_values=None, filter_attribute=None) -> pd.DataFrame:
+def umc_to_image_frame(patient_path, record_path, image_path, attribute_to_filter=None,
+                       muscles_to_use=None, legal_attribute_values=None, boolean_subset_attribute=None,
+                       dropna=False) -> pd.DataFrame:
     patients = pd.read_pickle(patient_path)
 
     records = pd.read_pickle(record_path)
@@ -109,25 +110,31 @@ def umc_to_image_frame(patient_path, record_path, image_path, attribute_to_use=N
 
     # merge in patient level information
     images = pd.merge(images, patients, on=['pid'], how='left')
-    if filter_attribute:
-        images = images[images[filter_attribute]]
-        print(f'Retained {len(images)} images after filtering on {filter_attribute}.')
-    if attribute_to_use:
-        images.dropna(subset=[attribute_to_use], inplace=True)
-        print(f'Retained {len(images)} images after dropping null values.')
+    if boolean_subset_attribute:
+        images = images[images[boolean_subset_attribute]]
+        print(f'Retained {len(images)} images after filtering on {boolean_subset_attribute}.')
 
-        print(f'Retained {len(images)} images after filtering on {filter_attribute}.')
-        if class_values:
-            drop_values = set(images[~images[attribute_to_use].isin(class_values)][attribute_to_use])
+    if attribute_to_filter:
+        if legal_attribute_values:
+            drop_values = set(images[~images[attribute_to_filter].isin(legal_attribute_values)][attribute_to_filter])
             if drop_values:
-                patients = images[images[attribute_to_use].isin(class_values)]
-                print(
-                    f'Retained {len(patients)} images after dropping {drop_values}.')
+                print(f'Replacing {drop_values} with nan.')
+                # replace with nan
+                images[attribute_to_filter] = images[attribute_to_filter].replace(drop_values,
+                                                                                      [numpy.nan] * len(drop_values))
+
+                # patients = images[images[attribute_to_filter].isin(legal_attribute_values)]
+                # print(
+                #     f'Retained {len(patients)} images after dropping {drop_values}.')
+        if dropna:
+            images.dropna(subset=[attribute_to_filter], inplace=True)
+            print(f'Retained {len(images)} images after dropping null values.')
+
     return images
 
 
-def umc_to_patient_list(patient_path, record_path, image_path, attribute_to_use=None, muscles_to_use=None,
-                        class_values=None, filter_attribute=None) -> List[
+def umc_to_patient_list(patient_path, record_path, image_path, attribute_to_filter=None, muscles_to_use=None,
+                        legal_attribute_values=None, boolean_subset_attribute=None, dropna=False) -> List[
     Patient]:
     patients = pd.read_pickle(patient_path)
 
@@ -135,28 +142,32 @@ def umc_to_patient_list(patient_path, record_path, image_path, attribute_to_use=
     images = pd.read_pickle(image_path)
     patients.set_index('pid', inplace=True)
     print(f'Read {len(patients)} patients, {len(records)} records and {len(images)} images.')
-    if filter_attribute:
-        patients = patients[patients[filter_attribute]]
+    if boolean_subset_attribute:
+        patients = patients[patients[boolean_subset_attribute]]
         records = records[records.pid.isin(set(patients.index))]
         images = images[images['rid'].isin(records.rid)]
         print(
-            f'Retained {len(patients)} patients, {len(records)} records and {len(images)} images after filtering on {filter_attribute}.')
+            f'Retained {len(patients)} patients, {len(records)} records and {len(images)} images after retaining based on {boolean_subset_attribute}.')
 
-
-    if attribute_to_use:
-        patients.dropna(subset=[attribute_to_use], inplace=True)
-        records = records[records.pid.isin(set(patients.index))]
-        images = images[images['rid'].isin(records.rid)]
-        print(
-            f'Retained {len(patients)} patients, {len(records)} records and {len(images)} images after dropping null values.')
-        if class_values:
-            drop_values = set(patients[~patients[attribute_to_use].isin(class_values)][attribute_to_use])
+    if attribute_to_filter:
+        if legal_attribute_values:
+            drop_values = set(patients[~patients[attribute_to_filter].isin(legal_attribute_values)][attribute_to_filter])
             if drop_values:
-                patients = patients[patients[attribute_to_use].isin(class_values)]
-                records = records[records.pid.isin(set(patients.index))]
-                images = images[images['rid'].isin(records.rid)]
-                print(
-                    f'Retained {len(patients)} patients, {len(records)} records and {len(images)} images after dropping {drop_values}.')
+                print(f'Replacing {drop_values} with nan.')
+                # replace with nan
+                patients[attribute_to_filter] = patients[attribute_to_filter].replace(drop_values,
+                                                                                      [numpy.nan] * len(drop_values))
+
+
+        # drop na values if so instructed..
+        if dropna:
+
+            patients.dropna(subset=[attribute_to_filter], inplace=True)
+            records = records[records.pid.isin(set(patients.index))]
+            images = images[images['rid'].isin(records.rid)]
+            print(
+                f'Retained {len(patients)} patients, {len(records)} records and {len(images)} images after dropping null values.')
+
     if muscles_to_use:
         images = images[images['Muscle'].isin(muscles_to_use)]
         # drop records that don't have this muscle
@@ -194,6 +205,24 @@ def umc_to_patient_list(patient_path, record_path, image_path, attribute_to_use=
 
     return converted_patients
 
+def collate_bags_to_batch_multi_atts(batch):
+    x = [batch[e][0] for e in range(len(batch))]
+    att_tensors = {}
+    for e in range(len(batch)):
+        att_dict = batch[e][1]
+        for k, v in att_dict.items():
+            new_v = torch.tensor(v)
+            if k not in att_tensors:
+                att_tensors[k] = []
+            att_tensors[k].append(new_v)
+    att_tensors = {k: torch.stack(v).unsqueeze(dim=1) for k, v in att_tensors.items()}
+
+    n_images_per_bag = torch.tensor([batch[x][0].shape[0] for x in range(len(batch))])
+    # concat into n_images * channels * height * width, i.e. squeeze out images per patient
+    img_rep = torch.cat(x)
+    x = img_rep, n_images_per_bag
+    return x, att_tensors
+
 
 # TODO move to some other place
 def collate_bags_to_batch(batch):
@@ -216,18 +245,19 @@ def get_n_cpu():
     print(f'Using {n_cpu} workers for data loading.')
     return n_cpu
 
-def make_bag_loader(patients: List[Patient], img_folder, use_one_channel, normalizer_name, attribute, batch_size,
-                    device, limit_image_size,
-                    use_pseudopatients=False, pin_memory=False, label_encoder=None):
+def make_bag_loader(patients: List[Patient], img_folder, use_one_channel, normalizer_name, attribute_specs, batch_size,
+                    device, limit_image_size, return_attribute_dict= False,
+                    use_pseudopatients=False, pin_memory=False):
     transform = make_basic_transform(device, normalizer_name=normalizer_name, limit_image_size=limit_image_size)
     # TODO allow comparison of different methods for using pseudopatients
     ds = PatientBagDataset(patient_list=patients, root_dir=img_folder,
-                           attribute=attribute, transform=transform, use_pseudopatients=use_pseudopatients,
-                           muscles_to_use=None, use_one_channel=use_one_channel, label_encoder= label_encoder)
+                           attribute_specs= attribute_specs, transform=transform, use_pseudopatients=use_pseudopatients,
+                           muscles_to_use=None, use_one_channel=use_one_channel, return_attribute_dict=return_attribute_dict)
 
     print(f'Total number of images in bag loader: {ds.get_total_number_of_images()}')
     n_cpu = get_n_cpu()
-    loader = DataLoader(ds, batch_size=batch_size, shuffle=True, num_workers=n_cpu, collate_fn=collate_bags_to_batch,
+    collate_fn = collate_bags_to_batch_multi_atts if return_attribute_dict else collate_bags_to_batch
+    loader = DataLoader(ds, batch_size=batch_size, shuffle=True, num_workers=n_cpu, collate_fn=collate_fn,
                         pin_memory=pin_memory, drop_last=True)
 
     return loader
@@ -241,8 +271,10 @@ def make_image_exporter(image_frame: pd.DataFrame, img_folder, use_one_channel, 
         for image, name in batch:
             image.save(os.path.join(export_path,name))
         return batch
+    
+    image_spec = AttributeSpec(name='Image',source='image', target_type='regression')
 
-    ds = SingleImageDataset(image_frame=image_frame,root_dir=img_folder,attribute='Image',transform=transform,
+    ds = SingleImageDataset(image_frame=image_frame,root_dir=img_folder,attribute_specs=[image_spec],transform=transform,
                             use_one_channel=use_one_channel)
 
     n_cpu = get_n_cpu()
@@ -252,8 +284,8 @@ def make_image_exporter(image_frame: pd.DataFrame, img_folder, use_one_channel, 
 
     return loader
 
-def make_image_loader(image_frame: pd.DataFrame, img_folder, use_one_channel, normalizer_name, attribute, batch_size,
-                      device, limit_image_size, pin_memory=False, label_encoder=None, is_multi=False):
+def make_image_loader(image_frame: pd.DataFrame, img_folder, use_one_channel, normalizer_name, attribute_specs, batch_size,
+                      device, limit_image_size, pin_memory=False, is_multi=False, return_multiple_atts=False):
 
     transform = make_basic_transform(device, normalizer_name=normalizer_name, limit_image_size=limit_image_size)
 
@@ -263,8 +295,9 @@ def make_image_loader(image_frame: pd.DataFrame, img_folder, use_one_channel, no
         batch = [elem if len(elem.shape) > 1 else elem.unsqueeze(1) for elem in batch]
         return batch
 
-    ds = SingleImageDataset(image_frame=image_frame,root_dir=img_folder,attribute=attribute,transform=transform,
-                            use_one_channel=use_one_channel, label_encoder=label_encoder)
+    ds = SingleImageDataset(image_frame=image_frame, root_dir=img_folder, attribute_specs=attribute_specs,
+                            return_attribute_dict= return_multiple_atts, transform=transform,
+                            use_one_channel=use_one_channel)
 
     n_cpu = get_n_cpu()
     # use default
@@ -320,8 +353,8 @@ def get_classes(data: Union[pd.DataFrame, List[Patient]], attribute):
         print(pd.Series(atts).value_counts())
         return set(atts)
 
-def get_data_for_spec(set_spec : SetSpec, loader_type='bag', attribute='Class', class_values=None, muscles_to_use=None,
-                      filter_attribute=None):
+def get_data_for_spec(set_spec : SetSpec, loader_type='bag', attribute_to_filter='Class', legal_attribute_values=None, muscles_to_use=None,
+                      boolean_subset_attribute=None, dropna_values=True):
     dataset_type = set_spec.dataset_type
     data_path = set_spec.label_path
     device_name = set_spec.device
@@ -335,8 +368,9 @@ def get_data_for_spec(set_spec : SetSpec, loader_type='bag', attribute='Class', 
             patients = umc_to_patient_list(os.path.join(to_load, 'patients.pkl'),
                                            os.path.join(to_load, 'records.pkl'),
                                            os.path.join(to_load, 'images.pkl'),
-                                           attribute_to_use=attribute, filter_attribute=filter_attribute,
-                                           class_values=class_values,muscles_to_use=muscles_to_use)
+                                           attribute_to_filter=attribute_to_filter, boolean_subset_attribute=boolean_subset_attribute,
+                                           legal_attribute_values=legal_attribute_values, muscles_to_use=muscles_to_use,
+                                           dropna=dropna_values)
             return patients
 
         elif loader_type == 'image':
@@ -344,8 +378,9 @@ def get_data_for_spec(set_spec : SetSpec, loader_type='bag', attribute='Class', 
             images = umc_to_image_frame(os.path.join(to_load, 'patients.pkl'),
                                         os.path.join(to_load, 'records.pkl'),
                                         os.path.join(to_load, 'images.pkl'),
-                                        attribute_to_use=attribute, filter_attribute=filter_attribute,
-                                        class_values=class_values,muscles_to_use=muscles_to_use)
+                                        attribute_to_filter=attribute_to_filter, boolean_subset_attribute=boolean_subset_attribute,
+                                        legal_attribute_values=legal_attribute_values, muscles_to_use=muscles_to_use,
+                                        dropna=dropna_values)
 
             return images
 
@@ -356,10 +391,10 @@ def get_data_for_spec(set_spec : SetSpec, loader_type='bag', attribute='Class', 
         to_load = os.path.join(data_path, csv_name)
         image_frame = load_myositis_images(to_load, muscles_to_use=muscles_to_use)
 
-        if class_values:
-            drop_values = set(image_frame[~image_frame[attribute].isin(class_values)][attribute])
+        if legal_attribute_values:
+            drop_values = set(image_frame[~image_frame[attribute_to_filter].isin(legal_attribute_values)][attribute_to_filter])
             if drop_values:
-                image_frame = image_frame[image_frame[attribute].isin(class_values)]
+                image_frame = image_frame[image_frame[attribute_to_filter].isin(legal_attribute_values)]
                 print(
                     f'Retained {len(image_frame)} images after dropping {drop_values}.')
 
