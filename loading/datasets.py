@@ -241,6 +241,16 @@ class PatientBagDataset(Dataset):
         return len(self.patients)
 
 
+class ConcatDataset(torch.utils.data.Dataset):
+    def __init__(self, *datasets):
+        self.datasets = datasets
+
+    def __getitem__(self, i):
+        return tuple(d[i] for d in self.datasets)
+
+    def __len__(self):
+        return min(len(d) for d in self.datasets)
+
 class Patient(object):
     def __init__(self, records, attributes):
         if len(records) == 0:
@@ -350,8 +360,7 @@ problem_kind = {'Sex': 'binary', 'Age': 'regression', 'BMI': 'regression',
 problem_source = {'Sex': 'patient', 'Age': 'record', 'BMI': 'record',
             'Class': 'patient'} # 'Muscle': 'image'
 
-problem_legal_values = {'Class': ['NMD', 'no NMD'], 'Sex': ['M', 'F']}
-
+problem_legal_values = {'Class': ['no NMD', 'NMD'], 'Sex': ['F', 'M']}
 
 def make_att_specs():
     att_spec_dict = {}

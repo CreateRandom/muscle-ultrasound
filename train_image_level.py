@@ -81,8 +81,6 @@ def train_image_level(config):
     # hand over to backend
     backend_kwargs = {'pretrained': pretrained, 'feature_extraction': feature_extraction, 'in_channels': in_channels}
 
-    use_pseudopatients = config.get('use_pseudopatients', False)
-
     # CONFIG ASPECTS
     use_cuda = config.get('use_cuda', True) & torch.cuda.is_available()
 
@@ -160,21 +158,13 @@ def train_image_level(config):
         for set_spec in set_spec_list:
             print(set_spec)
 
-
             # pass the classes in to ensure that only those are present in all the sets
             patients = get_data_for_spec(set_spec, loader_type='bag', attribute_to_filter=attribute,
                                          legal_attribute_values=train_classes,
                                          muscles_to_use=muscles_to_use, boolean_subset_attribute=filter_attribute,
                                          dropna_values=True)
-            patients = patients[0:10]
             print(f'Loaded {len(patients)} elements.')
 
-            # if classification and this is the train set, we want to fit the label encoder on this
-            if is_classification & (set_name == 'source_train'):
-                # if not specified yet, get all classes from the training set
-                if not train_classes:
-                    train_classes = get_classes(patients, attribute)
-                print(train_classes)
             img_path = set_spec.img_root_path
 
             # make the bag loader
@@ -190,7 +180,6 @@ def train_image_level(config):
                                        muscles_to_use=muscles_to_use, boolean_subset_attribute=filter_attribute,
                                        dropna_values=True)
 
-            images = images[0:100]
             
             image_loader = make_image_loader(images, img_path, use_one_channel, normalizer_name,
                                              attribute_specs, batch_size, set_spec.device, limit_image_size=limit_image_size,

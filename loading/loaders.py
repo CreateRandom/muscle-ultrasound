@@ -1,6 +1,7 @@
 import multiprocessing
 import os
 from dataclasses import dataclass
+from functools import partial
 from typing import List, Union
 
 import numpy
@@ -12,7 +13,7 @@ from torchvision import transforms
 from torchvision.transforms import transforms, CenterCrop, Resize
 
 from loading.datasets import PatientBagDataset, SingleImageDataset, \
-    PatientRecord, Patient, AttributeSpec
+    PatientRecord, Patient, AttributeSpec, ConcatDataset
 from loading.img_utils import FixedHeightCrop
 
 
@@ -238,12 +239,48 @@ def collate_bags_to_batch(batch):
     y = torch.stack(y)
     return x, y
 
+def collate_concat_dataset(list_of_batches, base_collate):
+    source = []
+    target = []
+    for batch in list_of_batches:
+        source.append(batch[0])
+        target.append(batch[1])
+    source = base_collate(source)
+    target = base_collate(target)
+    return source, target
+
 def get_n_cpu():
     n_cpu = multiprocessing.cpu_count()
     # for now cap this at some point to avoid memory issues
     n_cpu = 8 if n_cpu > 8 else n_cpu
     print(f'Using {n_cpu} workers for data loading.')
     return n_cpu
+
+
+def make_bag_dataset(patients: List[Patient], img_folder, use_one_channel, normalizer_name, attribute_specs,
+                    device, limit_image_size, return_attribute_dict= False,
+                    use_pseudopatients=False):
+    transform = make_basic_transform(device, normalizer_name=normalizer_name, limit_image_size=limit_image_size)
+    # TODO allow comparison of different methods for using pseudopatients
+    ds = PatientBagDataset(patient_list=patients, root_dir=img_folder,
+                           attribute_specs= attribute_specs, transform=transform, use_pseudopatients=use_pseudopatients,
+                           muscles_to_use=None, use_one_channel=use_one_channel, return_attribute_dict=return_attribute_dict)
+
+    print(f'Total number of images in dataset: {ds.get_total_number_of_images()}')
+
+    return ds
+
+def wrap_in_bag_loader(ds, batch_size, pin_memory=False, return_attribute_dict=False):
+    n_cpu = get_n_cpu()
+    base_collate_fn = collate_bags_to_batch_multi_atts if return_attribute_dict else collate_bags_to_batch
+
+    if isinstance(ds,ConcatDataset):
+        base_collate_fn = partial(collate_concat_dataset, base_collate=base_collate_fn)
+
+    loader = DataLoader(ds, batch_size=batch_size, shuffle=True, num_workers=n_cpu, collate_fn=base_collate_fn,
+                        pin_memory=pin_memory, drop_last=True)
+
+    return loader
 
 def make_bag_loader(patients: List[Patient], img_folder, use_one_channel, normalizer_name, attribute_specs, batch_size,
                     device, limit_image_size, return_attribute_dict= False,

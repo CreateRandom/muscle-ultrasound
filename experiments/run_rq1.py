@@ -14,21 +14,20 @@ def run_rq1():
 
     num_samples = 12
 
-    attributes = ['Class']
+    attribute = 'Class'
 
-    for attribute in attributes:
+    esaote_train = {'source_train': 'ESAOTE_6100_train',
+                    'val': ['ESAOTE_6100_val', 'Philips_iU22_val']}
+
+    philips_train = {'source_train': 'Philips_iU22_train',
+                     'val': ['ESAOTE_6100_val', 'Philips_iU22_val']}
+
+    train_set_specs = [esaote_train, philips_train]
+
+    for train_set_spec in train_set_specs:
 
         base_config = {'prediction_target': attribute, 'backend_mode': 'finetune',
                   'backend': 'resnet-18', 'n_epochs': 10, 'neptune_project': 'createrandom/MUS-RQ1'}
-
-
-        esaote_train = {'source_train': 'ESAOTE_6100_train',
-                             'val': ['ESAOTE_6100_val', 'Philips_iU22_val']}
-
-        philips_train = {'source_train': 'Philips_iU22_train',
-                             'val': ['ESAOTE_6100_val', 'Philips_iU22_val']}
-
-        train_set_spec = esaote_train
 
         base_config = {**base_config, **train_set_spec}
 
@@ -47,15 +46,15 @@ def run_rq1():
                  num_samples=num_samples,
                  resources_per_trial={"gpu": 1, "cpu": 8})
 
-        # decide what to run here
+        # run single head classification with no adjustments
 
-        bag_config_mean = {'problem_type': 'bag', 'batch_size': 8, 'mil_mode': 'embedding',
+        bag_config_shared = {'problem_type': 'bag', 'batch_size': 8, 'mil_mode': 'embedding',
                       'use_pseudopatients': True, 'fc_use_bn': True, 'fc_hidden_layers': 2,
                       'backend_cutoff': 1}
 
-        bag_config_mean = {**base_config, **bag_config_mean, **{'mil_pooling': 'mean'}}
+        bag_config_mean = {**base_config, **bag_config_shared, **{'mil_pooling': 'mean'}}
 
-        bag_config_att = {**base_config, **bag_config_mean, **{'mil_pooling': 'attention', 'attention_mode': 'sigmoid'}}
+        bag_config_att = {**base_config, **bag_config_shared, **{'mil_pooling': 'attention', 'attention_mode': 'sigmoid'}}
 
         bag_sweep_config = {
             # lr for bag classifier and pooling

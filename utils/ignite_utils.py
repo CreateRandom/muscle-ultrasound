@@ -5,13 +5,52 @@ import torch
 from ignite.engine import _prepare_batch, Engine, DeterministicEngine
 from ignite.metrics import Metric
 
+from utils.coral import coral
 from utils.metric_utils import loss_mapping
 
+def compute_classification_loss(head_preds, y, att_specs, loss_weights=None):
+    if not loss_weights:
+        loss_weights = {}
+    loss_dict = {}
+    for att_spec in att_specs:
+        name = att_spec.name
+        loss_fn = loss_mapping[att_spec.target_type]
+        # filter nan values in y
+        to_keep = ~torch.isnan(y[name])
+        _y = y[name][to_keep]
+        _y_pred = head_preds[name][to_keep]
+        # some batches might be entirely nan, skip these
+        if _y.nelement() > 0:
+            loss = loss_fn(_y_pred, _y)
+            loss_dict[name] = loss
+
+    weighted_losses = dict([(k, loss_weights[k] * v) if k in loss_weights else (k, v) for k, v in loss_dict.items()])
+
+    loss = sum(weighted_losses.values())
+
+    return loss
+
+def compute_coral_loss(src_head_acts, tgt_head_acts, att_specs, layer_inds, loss_weights):
+    loss_dict = {}
+    for att_spec in att_specs:
+        name = att_spec.name
+        c_loss = 0
+        for layer in layer_inds:
+            c_loss = c_loss + coral(src_head_acts[name][layer], tgt_head_acts[name][layer])
+
+        loss_dict[name] = c_loss
+
+    weighted_losses = dict([(k, loss_weights[k] * v) if k in loss_weights else (k, v) for k, v in loss_dict.items()])
+
+    loss = sum(weighted_losses.values())
+
+    return loss, loss_dict
 
 def create_bag_attention_trainer(
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
     att_specs,
+    att_loss_weights = None,
     device: Optional[Union[str, torch.device]] = None,
     non_blocking: bool = False,
     prepare_batch: Callable = _prepare_batch,
@@ -53,6 +92,9 @@ def create_bag_attention_trainer(
     device_type = device.type if isinstance(device, torch.device) else device
     on_tpu = "xla" in device_type if device_type is not None else False
 
+    if not att_loss_weights:
+        att_loss_weights = {}
+
     if on_tpu:
         try:
             import torch_xla.core.xla_model as xm
@@ -63,27 +105,10 @@ def create_bag_attention_trainer(
         model.train()
         optimizer.zero_grad()
         x, y = prepare_batch(batch, device=device, non_blocking=non_blocking)
-        y_pred, attention_outputs = model(x)
+        model_return_dict = model(x)
+        head_preds = model_return_dict['head_preds']
+        loss = compute_classification_loss(head_preds, y, att_specs, att_loss_weights)
 
-        loss_dict = {}
-        for att_spec in att_specs:
-            name = att_spec.name
-            loss_fn = loss_mapping[att_spec.target_type]
-            # filter nan values in y
-            to_keep = ~torch.isnan(y[name])
-            _y = y[name][to_keep]
-            _y_pred = y_pred[name][to_keep]
-            # some batches might be entirely nan, skip these
-            if _y.nelement() > 0:
-                loss = loss_fn(_y_pred, _y)
-                loss_dict[name] = loss
-
-        # TODO parametrize
-        loss_weights = {'Age': 0.001, 'BMI': 0.001}
-
-        weighted_losses = dict([(k, loss_weights[k] * v) if k in loss_weights else (k,v) for k, v in loss_dict.items() ])
-
-        loss = sum(weighted_losses.values())
         if loss > 0:
             loss.backward()
 
@@ -93,12 +118,15 @@ def create_bag_attention_trainer(
                 optimizer.step()
         else:
             loss = torch.tensor(0)
+        return_dict = {}
+        return_dict['preds'] = head_preds
 
-        # flatten the scores
-        att_scores_flat = flatten_attention_scores(attention_outputs)
+        if 'attention_outputs' in model_return_dict:
+            # flatten the scores
+            att_scores_flat = flatten_attention_scores(model_return_dict['attention_outputs'])
+            return_dict['atts'] = att_scores_flat
 
-        y_pred = {'preds': y_pred, 'atts': att_scores_flat}
-        return output_transform(x, y, y_pred, loss)
+        return output_transform(x, y, return_dict, loss)
 
     trainer = Engine(_update) if not deterministic else DeterministicEngine(_update)
 
@@ -160,12 +188,16 @@ def create_bag_attention_evaluator(
     def _inference(engine: Engine, batch: Sequence[torch.Tensor]) -> Union[Any, Tuple[torch.Tensor]]:
         model.eval()
         with torch.no_grad():
+            pred_output = {}
             x, y = prepare_batch(batch, device=device, non_blocking=non_blocking)
-            y_pred, attention_outputs = model(x)
-            # flatten the scores
-            att_scores_flat = flatten_attention_scores(attention_outputs)
-            y_pred = {'preds': y_pred, 'atts': att_scores_flat}
-            return output_transform(x, y, y_pred)
+            model_return_dict = model(x)
+            pred_output['preds'] = model_return_dict['head_preds']
+
+            # if attention scores are available, flatten and return them
+            if 'attention_outputs' in model_return_dict:
+                att_scores_flat = flatten_attention_scores(model_return_dict['attention_outputs'])
+                pred_output['atts'] = att_scores_flat
+            return output_transform(x, y, pred_output)
 
     evaluator = Engine(_inference)
 
@@ -173,3 +205,108 @@ def create_bag_attention_evaluator(
         metric.attach(evaluator, name)
 
     return evaluator
+
+def create_da_trainer(
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    att_specs,
+    lambda_weight,
+    layers_to_compute_da_on,
+    att_loss_weights = None,
+    device: Optional[Union[str, torch.device]] = None,
+    non_blocking: bool = False,
+    prepare_batch: Callable = _prepare_batch,
+    output_transform: Callable = lambda x, y, y_pred, loss: loss.item(),
+    deterministic: bool = False,
+) -> Engine:
+    """
+    Factory function for creating a trainer for supervised models.
+    Args:
+        model (`torch.nn.Module`): the model to train.
+        optimizer (`torch.optim.Optimizer`): the optimizer to use.
+        loss_fn (torch.nn loss function): the loss function to use.
+        device (str, optional): device type specification (default: None).
+            Applies to batches after starting the engine. Model *will not* be moved.
+            Device can be CPU, GPU or TPU.
+        non_blocking (bool, optional): if True and this copy is between CPU and GPU, the copy may occur asynchronously
+            with respect to the host. For other cases, this argument has no effect.
+        prepare_batch (callable, optional): function that receives `batch`, `device`, `non_blocking` and outputs
+            tuple of tensors `(batch_x, batch_y)`.
+        output_transform (callable, optional): function that receives 'x', 'y', 'y_pred', 'loss' and returns value
+            to be assigned to engine's state.output after each iteration. Default is returning `loss.item()`.
+        deterministic (bool, optional): if True, returns deterministic engine of type
+            :class:`~ignite.engine.deterministic.DeterministicEngine`, otherwise :class:`~ignite.engine.Engine`
+            (default: False).
+    Note:
+        `engine.state.output` for this engine is defined by `output_transform` parameter and is the loss
+        of the processed batch by default.
+    .. warning::
+        The internal use of `device` has changed.
+        `device` will now *only* be used to move the input data to the correct device.
+        The `model` should be moved by the user before creating an optimizer.
+        For more information see:
+        * `PyTorch Documentation <https://pytorch.org/docs/stable/optim.html#constructing-it>`_
+        * `PyTorch's Explanation <https://github.com/pytorch/pytorch/issues/7844#issuecomment-503713840>`_
+    Returns:
+        Engine: a trainer engine with supervised update function.
+    """
+
+    device_type = device.type if isinstance(device, torch.device) else device
+    on_tpu = "xla" in device_type if device_type is not None else False
+
+    if not att_loss_weights:
+        att_loss_weights = {}
+
+    if on_tpu:
+        try:
+            import torch_xla.core.xla_model as xm
+        except ImportError:
+            raise RuntimeError("In order to run on TPU, please install PyTorch XLA")
+
+    def _update(engine: Engine, batch: Sequence[torch.Tensor]) -> Union[Any, Tuple[torch.Tensor]]:
+        pred_output = {}
+        model.train()
+        optimizer.zero_grad()
+        source, target = prepare_batch(batch, device=device, non_blocking=non_blocking)
+        x_src, y_src = source
+        x_tgt, _ = target
+        model_out_src = model(x_src)
+        head_preds = model_out_src['head_preds']
+        class_loss = compute_classification_loss(head_preds, y_src, att_specs, att_loss_weights)
+
+        # store the predictions
+        pred_output['preds'] = model_out_src['head_preds']
+
+        # if attention scores are available, flatten and return them
+        if 'attention_outputs' in model_out_src:
+            att_scores_flat = flatten_attention_scores(model_out_src['attention_outputs'])
+            pred_output['atts'] = att_scores_flat
+
+        # predict the target data
+        model_out_tgt = model(x_tgt)
+
+
+        # get the layer_act_dict
+        coral_loss, coral_loss_dict = compute_coral_loss(model_out_src['head_acts'], model_out_tgt['head_acts'], att_specs,
+                                        layer_inds=layers_to_compute_da_on, loss_weights={})
+        loss = class_loss + lambda_weight * coral_loss
+        loss.backward()
+
+        if on_tpu:
+            xm.optimizer_step(optimizer, barrier=True)
+        else:
+            optimizer.step()
+
+        pred_output['coral_losses'] = coral_loss_dict
+
+        return output_transform(x_src, y_src, pred_output, loss)
+
+    trainer = Engine(_update) if not deterministic else DeterministicEngine(_update)
+
+    return trainer
+
+class StateDictWrapper(object):
+    def __init__(self, object):
+        self.object = object
+    def state_dict(self):
+        return self.object

@@ -2,7 +2,7 @@ import functools
 
 import torch
 
-from torch import nn
+from torch import nn, Tensor
 import numpy as np
 from models.mil_pooling import MaxMIL, AttentionMIL, AverageMIL, GatedAttentionMIL
 from models.premade import make_resnet_18, make_alexnet
@@ -237,7 +237,7 @@ class MultiInputNet(nn.Module):
         all_mats_flat = self.backend(img_rep)
         # split by patient
         pwise_images = torch.split(all_mats_flat, n_images_per_bag)
-
+        to_return = {}
         # reshape back to original format
         # mil_inputs = all_mats_flat.reshape(n_patients, n_images_per_patient, self.backend_out_dim)
         pooled = []
@@ -259,17 +259,48 @@ class MultiInputNet(nn.Module):
 
        # pooled = self.classifier(pooled)
         head_outputs = {}
+        head_activations = {}
+
         for name, head in self.heads.items():
-            output = head(pooled)
-            if output.ndimension() == 1:
-                output = output.unsqueeze(1)
-            head_outputs[name] = output
 
+            classifier_out = head(pooled)
+            preds = classifier_out['y_pred']
+
+            if preds.ndimension() == 1:
+                preds = preds.unsqueeze(1)
+            head_outputs[name] = preds
+            if 'layer_act' in classifier_out:
+                head_activations[name] = classifier_out['layer_act']
+
+        to_return['head_preds'] = head_outputs
+        if head_activations:
+            to_return['head_acts'] = head_activations
+        if attention_outputs:
+            to_return['attention_outputs'] = attention_outputs
+        return to_return
+
+   #     return head_outputs, attention_outputs
+
+        # # # ensure batch first format
+        # # if pooled.ndimension() == 1:
+        # #     pooled = pooled.unsqueeze(1)
+        # classifier_out = self.classifier(pooled)
+        # preds = classifier_out['y_pred']
         # # ensure batch first format
-        # if pooled.ndimension() == 1:
-        #     pooled = pooled.unsqueeze(1)
-
-        return head_outputs, attention_outputs
+        # if preds.ndimension() == 1:
+        #     preds = preds.unsqueeze(1)
+        #
+        # to_return['y_out'] = preds
+        # if attention_outputs:
+        #     to_return['atts'] = attention_outputs
+        # if 'layer_act' in classifier_out:
+        #
+        #
+        #     to_return['layer_act'] = classifier_out['layer_act']
+        #
+        # print(self.total_images_seen)
+        #
+        # return to_return
 
     @staticmethod
     def make_backend(backend_name, mode, backend_cutoff, backend_kwargs):
@@ -322,9 +353,32 @@ class MultiInputNet(nn.Module):
         # add the readout layer at the very end
         mlp += [nn.Linear(in_dim, out_dim)]
         # connect into sequential
-        classifier = nn.Sequential(*mlp)
+        classifier = MLPClassifier(layers=mlp, return_act=True)
 
         return classifier
+
+
+class MLPClassifier(nn.Sequential):
+
+    def __init__(self, layers, return_act=False) -> None:
+        super().__init__(*layers)
+        self.return_act = return_act
+
+    def forward(self, input: Tensor):
+        return_dict = {}
+        layer_acts = []
+        for i, module in enumerate(self):
+            input = module(input)
+
+            # only store linear layer activations
+            if self.return_act and isinstance(module, nn.Linear) and i < len(self):
+                layer_acts.append(input)
+
+        # store the final y_pred
+        return_dict['y_pred'] = input
+        if layer_acts:
+            return_dict['layer_act'] = layer_acts
+        return return_dict
 
 def BernoulliLoss(output, target):
     # apply the sigmoid here

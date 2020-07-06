@@ -1,5 +1,7 @@
-from loading.datasets import problem_kind, make_att_specs
-from loading.loaders import make_bag_loader, get_data_for_spec, get_classes
+import warnings
+
+from loading.datasets import problem_kind, make_att_specs, ConcatDataset
+from loading.loaders import make_bag_loader, get_data_for_spec, get_classes, make_bag_dataset, wrap_in_bag_loader
 from loading.loading_utils import make_set_specs
 from models.multi_input import MultiInputNet
 import os
@@ -10,14 +12,15 @@ from torch import optim
 
 from ignite.engine import Events
 from ignite.contrib.handlers import ProgressBar
-from ignite.handlers import global_step_from_engine
+from ignite.handlers import global_step_from_engine, ModelCheckpoint
 
 from training_utils import fix_seed
 # import logging
 from ignite.contrib.handlers.neptune_logger import NeptuneLogger, OutputHandler, WeightsScalarHandler, \
     GradsScalarHandler
 
-from utils.ignite_utils import create_bag_attention_trainer, create_bag_attention_evaluator
+from utils.ignite_utils import create_bag_attention_trainer, create_bag_attention_evaluator, create_da_trainer, \
+    StateDictWrapper
 from utils.utils import pytorch_count_params
 from utils.metric_utils import obtain_metrics, Variance, Average, Minimum, Maximum
 from utils.tokens import NEPTUNE_API_TOKEN
@@ -57,7 +60,7 @@ def train_multi_input(config):
     mil_pooling = config.get('mil_pooling', 'mean')
     attention_mode = config.get('attention_mode', 'identity')
     attention_D = config.get('attention_D', 128)
-    pooling_kwargs = {'mode' : attention_mode, 'D': attention_D}
+    pooling_kwargs = {'mode': attention_mode, 'D': attention_D}
 
     fc_hidden_layers = config.get('fc_hidden_layers', 0)
     fc_use_bn = config.get('fc_use_bn', True)
@@ -67,11 +70,12 @@ def train_multi_input(config):
 
     attribute = config.get('prediction_target', 'Age')
 
+    # whether to drop all patients that have no value for the main attribute
+    drop_na_main_attribute_values = config.get('drop_na_main_attribute_values', True)
+
     if attribute not in problem_kind:
         raise ValueError(f'Unknown attribute {attribute}')
-    label_type = problem_kind[attribute]
-    is_classification = (label_type == 'multi' or (label_type == 'binary'))
-    is_multi = (label_type == 'multi')
+
     # TRAINING ASPECTS
     batch_size = config.get('batch_size', 4)
     # more than two bags per batch are likely to overwhelm memory
@@ -89,6 +93,23 @@ def train_multi_input(config):
     backend_kwargs = {'pretrained': pretrained, 'feature_extraction': feature_extraction, 'in_channels': in_channels}
 
     use_pseudopatients = config.get('use_pseudopatients', False)
+
+    # Multi-Head
+    # loss weights for every attribute
+    att_loss_weights = config.get('att_loss_weights', {})
+    # get all attributes
+    additional_atts = list(att_loss_weights.keys())
+    # remove the base attribute here, as it's not additional
+    if attribute in additional_atts:
+        additional_atts.remove(attribute)
+
+    # DA
+    # warn user if lambda weight specified but no DA
+    if 'lambda_weight' in config and not 'target_train' in config:
+        warnings.warn('Specified weight for DA but did not provide target set!')
+    lambda_weight = config.get('lambda_weight', 0.5)
+
+    layers_to_compute_da_on = config.get('layers_to_compute_da_on', [1])
 
     # CONFIG ASPECTS
     use_cuda = config.get('use_cuda', True) & torch.cuda.is_available()
@@ -119,11 +140,7 @@ def train_multi_input(config):
     jhu_data_path = os.path.join(mnt_path, 'klaus/myositis/')
     jhu_img_root = os.path.join(mnt_path, 'klaus/myositis/processed_imgs')
 
-    # additional prediction targets
-    additional_atts = ['Age'] #['Age']
-    # whether to drop all patients that have no value for the main attribute
-    drop_na_main_attribute_values = False
-
+    # get all attribute specs for the specified problem
     attribute_specs = []
     # yields all possible attributes to predict
     att_spec_dict = make_att_specs()
@@ -135,6 +152,7 @@ def train_multi_input(config):
     train_classes = att_spec_dict[attribute].legal_values
     # whether or not to drop all patients with na values depends on single vs multi-head
     multihead = bool(additional_atts)
+    print(f'Performing multi-head classification?: {multihead}')
     # listen to user specified input in case it is multihead, else, always drop na values
     dropna_values = drop_na_main_attribute_values if multihead else True
 
@@ -148,7 +166,7 @@ def train_multi_input(config):
 
     # 'target_train': SetSpec('Philips_iU22', 'umc', 'train', umc_data_path)
     desired_set_specs = {'source_train': source_train, 'target_train' : target_train,
-                         'val': val} # 'GE_Logiq_E_im_muscle_chart']}
+                         'val': val}
 
     # yields a mapping from names to set_specs
     set_spec_dict = make_set_specs(umc_data_path, umc_img_root, jhu_data_path, jhu_img_root)
@@ -170,16 +188,16 @@ def train_multi_input(config):
 
     desired_set_specs = resolved_set_specs
 
-    set_loaders = {}
     muscles_to_use = None
     use_most_frequent_muscles = config.get('muscle_subset', False)
     if use_most_frequent_muscles:
         muscles_to_use = ['Biceps brachii', 'Tibialis anterior', 'Gastrocnemius medial head', 'Flexor carpi radialis',
                           'Vastus lateralis']
 
+    dataset_storage = {}
     for set_name, set_spec_list in desired_set_specs.items():
-
-        bag_loaders = []
+        datasets = []
+        # bag_loaders = []
         for set_spec in set_spec_list:
             print(set_spec)
             # always drop na values for the validation or test set
@@ -190,34 +208,65 @@ def train_multi_input(config):
                                          muscles_to_use=muscles_to_use, boolean_subset_attribute=filter_attribute,
                                          dropna_values=dropna_values_set)
 
-           # patients = patients[0:10]
+            patients = patients[0:10]
             print(f'Loaded {len(patients)} elements.')
-
-            # if classification and this is the train set, we want to fit the label encoder on this
-            if is_classification & (set_name == 'source_train'):
-                # if not specified yet, get all classes from the training set
-                if not train_classes:
-                    train_classes = get_classes(patients, attribute)
 
             img_path = set_spec.img_root_path
 
             use_pseudopatient_locally = (set_name != 'val') & use_pseudopatients
-            loader = make_bag_loader(patients, img_path, use_one_channel, normalizer_name,
-                                     attribute_specs, batch_size, set_spec.device, limit_image_size=limit_image_size,
+            # loader = make_bag_loader(patients, img_path, use_one_channel, normalizer_name,
+            #                          attribute_specs, batch_size, set_spec.device, limit_image_size=limit_image_size,
+            #                          use_pseudopatients=use_pseudopatient_locally,
+            #                          pin_memory=use_cuda, return_attribute_dict=True)
+            # bag_loaders.append(loader)
+
+            ds = make_bag_dataset(patients, img_path, use_one_channel, normalizer_name,
+                                     attribute_specs, set_spec.device, limit_image_size=limit_image_size,
                                      use_pseudopatients=use_pseudopatient_locally,
-                                     pin_memory=use_cuda, return_attribute_dict=True)
+                                     return_attribute_dict=True)
+
+            datasets.append(ds)
+
+        dataset_storage[set_name] = datasets
+
+    perform_da = ('source_train' in dataset_storage) and ('target_train' in dataset_storage)
+
+    if perform_da:
+        # make a combined dataset for both
+        ds = ConcatDataset(*[dataset_storage['source_train'][0], dataset_storage['target_train'][0]])
+        dataset_storage.pop('target_train')
+        dataset_storage.pop('source_train')
+
+        dataset_storage['train'] = ds
+
+    else:
+        dataset_storage['train'] = dataset_storage['source_train']
+        dataset_storage.pop('source_train')
+
+    set_loaders = {}
+    # create data loaders for all the sets
+    for set_name, dataset_list in dataset_storage.items():
+        if not isinstance(dataset_list, list):
+            dataset_list = [dataset_list]
+        bag_loaders = []
+        for ds in dataset_list:
+            loader = wrap_in_bag_loader(ds, batch_size, pin_memory=use_cuda, return_attribute_dict=True)
             bag_loaders.append(loader)
-
-
         set_loaders[set_name] = bag_loaders
 
     # create the desired model
-    model = MultiInputNet(attribute_specs, backend=backend, mil_pooling=mil_pooling,
+    model = MultiInputNet(att_specs=attribute_specs, backend=backend, mil_pooling=mil_pooling,
                       pooling_kwargs=pooling_kwargs,
                       mode=mil_mode,
                       fc_hidden_layers=fc_hidden_layers, fc_use_bn=fc_use_bn,
                       backend_cutoff=backend_cutoff,
                       backend_kwargs=backend_kwargs)
+    
+    model_param_dict = {'att_specs' : attribute_specs, 'backend': backend, 'mil_pooling' : mil_pooling,
+                      'pooling_kwargs': pooling_kwargs, 'mode':mil_mode, 'fc_hidden_layers':fc_hidden_layers,
+                      'fc_use_bn': fc_use_bn,
+                      'backend_cutoff':backend_cutoff,
+                      'backend_kwargs':backend_kwargs}
 
     n_params_backend = pytorch_count_params(model.backend)
     n_params_classifier = pytorch_count_params(model.heads[attribute])
@@ -237,17 +286,15 @@ def train_multi_input(config):
     # this custom transform allows attaching metrics directly to the trainer
     # as y and y_pred can be read out from the output dict
     def custom_output_transform(x, y, y_pred, loss):
-        return {
+        base_dict = {
             "y": y,
             "y_pred": y_pred['preds'],
             "atts": y_pred['atts'],
             "loss": loss.item()
         }
-
-
-    trainer = create_bag_attention_trainer(model, optimizer, attribute_specs,
-                                           device=device, output_transform=custom_output_transform,
-                                           deterministic=True)
+        if 'coral_losses' in y_pred:
+            base_dict['coral_losses'] = y_pred['coral_losses']
+        return base_dict
 
     metrics = obtain_metrics(attribute_specs=attribute_specs, extract_multiple_atts=True)
 
@@ -260,8 +307,29 @@ def train_multi_input(config):
                           'max_att': Maximum(output_transform=lambda output: output['atts'])}
         metrics = {**metrics, **metrics_to_add}
 
+    if perform_da:
+        coral_metrics = {}
+        # add a custom metric for passing through the coral losses
+        for att_spec in attribute_specs:
+            coral_metrics['mean_coral_' + att_spec.name] = Average(output_transform=lambda output: output['coral_losses'][att_spec.name])
+
+        train_metrics = {**metrics, **coral_metrics}
+
+        trainer = create_da_trainer(model, optimizer, attribute_specs,
+                                    att_loss_weights=att_loss_weights, lambda_weight=lambda_weight,
+                                    layers_to_compute_da_on=layers_to_compute_da_on,
+                                    device=device, output_transform=custom_output_transform,
+                                    deterministic=True)
+    else:
+
+        train_metrics = metrics
+        trainer = create_bag_attention_trainer(model, optimizer, attribute_specs,
+                                               att_loss_weights=att_loss_weights,
+                                               device=device, output_transform=custom_output_transform,
+                                               deterministic=True)
+
     # attach metrics to the trainer
-    for set_spec, metric in metrics.items():
+    for set_spec, metric in train_metrics.items():
         metric.attach(trainer, set_spec)
 
     npt_logger = NeptuneLogger(api_token=NEPTUNE_API_TOKEN, project_name=project_name,
@@ -338,7 +406,7 @@ def train_multi_input(config):
     checkpoint_dir = 'checkpoints'
 
     # checkpointer = ModelCheckpoint(checkpoint_dir, 'pref', n_saved=3, create_dir=True, require_empty=False)
-    # trainer.add_event_handler(Events.EPOCH_COMPLETED(every=1), checkpointer, {'mymodel': model})
+    # trainer.add_event_handler(Events.EPOCH_COMPLETED(every=1), checkpointer, {'model_state_dict': model, 'model_param_dict': StateDictWrapper(model_param_dict)})
 
     @trainer.on(Events.EPOCH_COMPLETED)
     def log_results(trainer):
@@ -355,7 +423,7 @@ def train_multi_input(config):
         #  tune.track.log(iter=evaluator.state.epoch, mean_accuracy=metrics['accuracy'])
 
     # get the appropriate loader
-    train_loader = set_loaders['source_train'][0]
+    train_loader = set_loaders['train'][0]
     trainer.run(train_loader, max_epochs=n_epochs)
 
     npt_logger.close()
@@ -373,6 +441,9 @@ if __name__ == '__main__':
 
     only_esaote = {'source_train': 'ESAOTE_6100_train',
                          'val': 'ESAOTE_6100_val'}
+
+    da = {'source_train': 'ESAOTE_6100_train', 'target_train': 'Philips_iU22_train',
+                         'val': ['ESAOTE_6100_val', 'Philips_iU22_val']}
     config = {**bag_config, **only_esaote}
 
     train_multi_input(config)
