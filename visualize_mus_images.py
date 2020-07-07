@@ -2,7 +2,7 @@ import os
 import matplotlib.pyplot as plt
 import numpy as np
 from mpl_toolkits.axes_grid1 import ImageGrid
-from loading.datasets import PatientBagDataset
+from loading.datasets import PatientBagDataset, make_att_specs
 from loading.loaders import make_basic_transform, umc_to_patient_list
 
 
@@ -30,12 +30,12 @@ umc_data_path = os.path.join(mnt_path, 'klaus/data/devices/')
 base_path = os.path.join(umc_data_path,device, 'train')
 patients = umc_to_patient_list(os.path.join(base_path, 'patients.pkl'),
                                     os.path.join(base_path, 'records.pkl'),
-                                    os.path.join(base_path, 'images.pkl'))
-
+                                    os.path.join(base_path, 'images.pkl'), dropna=False)
+att_spec_dict = make_att_specs()
 
 transform = make_basic_transform(device, limit_image_size=True)
 ds = PatientBagDataset(patient_list=patients, root_dir='/mnt/chansey/klaus/total_patients/', use_pseudopatients=False,
-                       attribute_specs=[], transform=transform,stack_images=False, use_mask=False)
+                       attribute_specs=[att_spec_dict['Sex']], transform=transform,stack_images=False, use_mask=False)
 for i in range(5):
     x, y = ds[i]
     for elem in x:

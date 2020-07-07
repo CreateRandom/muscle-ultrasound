@@ -2,18 +2,25 @@ import json
 import os
 import pickle
 import socket
+from functools import partial
 from inspect import signature
 import matplotlib.pyplot as plt
 import numpy as np
+import torchvision
+from PIL import ImageEnhance
 from scipy import stats
+from scipy.stats import describe
 from sklearn.dummy import DummyClassifier, DummyRegressor
 from sklearn.linear_model import LinearRegression
 import pandas as pd
-from loading.datasets import PatientRecord, problem_kind, problem_legal_values
-from loading.loaders import get_data_for_spec
+from loading.datasets import PatientRecord, problem_kind, problem_legal_values, SingleImageDataset, make_att_specs
+from loading.img_utils import load_image
+from loading.loaders import get_data_for_spec, make_basic_transform
 from loading.loading_utils import make_set_specs
 
 from sklearn.metrics import mean_absolute_error, accuracy_score, classification_report
+
+from utils.utils import compute_normalization_parameters
 
 
 class MuscleZScoreEncoder(object):
@@ -169,6 +176,64 @@ def run_dummy_baseline(set_name, attribute):
 
     print(scorer(y_true, train_preds))
 
+def compute_EIZ_from_scratch(record, root_path, z_score_encoder):
+    
+    load_func = partial(load_image, root_dir=root_path, use_one_channel=True,
+                        use_mask=True)
+
+    def compute_EI_manually(img_path):
+        pil_image = load_func(img_path)
+
+        np_array = np.asarray(pil_image)
+        ei = np.mean(np_array[np_array > 0])
+        return ei
+
+    record.image_frame['EI_manual'] = record.image_frame['ImagePath'].apply(compute_EI_manually).to_list()
+
+    manual_EI = record.image_frame.groupby(['Muscle', 'Side']).mean()['EI_manual']
+    manual_EI = round(manual_EI).astype(int)
+    manual_muscles = manual_EI.index.get_level_values(0).values
+    manual_sides = manual_EI.index.get_level_values(1).values
+
+    muscles_to_encode = [{'Muscle': v1, 'Side': v2, 'EI': v3} for v1, v2, v3 in
+                                zip(manual_muscles, manual_sides, manual_EI)]
+
+    EIZ = z_score_encoder.encode_muscles(muscles_to_encode, record.meta_info)
+
+    return EIZ
+
+handedness_mapping = {'L' : 'Links', 'R': 'Rechts'}
+
+def obtain_zscores(EIs, record, z_score_encoder):
+    handedness = [handedness_mapping[x] for x in record.meta_info['Sides']]
+
+    muscles_to_encode = [{'Muscle': v1, 'Side': v2, 'EI': v3} for v1, v2, v3 in
+                                zip(record.meta_info['Muscles_list'], handedness, EIs)]
+
+    EIZ = z_score_encoder.encode_muscles(muscles_to_encode, record.meta_info)
+
+    return EIZ
+
+def adjust_EI_with_factor(record, factor):
+    mapped_EI = np.array(record.meta_info['EIs']) * factor
+    return mapped_EI
+
+def adjust_EI_with_regression(record, lr_model):
+    mapped_EI = lr_model.predict(np.array(record.meta_info['EIs']).reshape(-1, 1)).tolist()
+    return mapped_EI
+
+def obtain_scores_and_preds(EIZ, record, name):
+
+    new_exceed_scores = compute_exceed_scores(EIZ)
+    new_exceed_scores['Age'] = record.meta_info['Age']
+
+    new_pred = predict_rule_based(new_exceed_scores)
+    new_exceed_scores['pred'] = new_pred
+    new_exceed_scores.pop('Age')
+    new_exceed_scores['method'] = name
+    new_exceed_scores['pid'] = record.meta_info['pid']
+    return new_exceed_scores
+
 
 def run_rule_based_baseline(set_name):
     set_spec_dict = get_default_set_spec_dict()
@@ -179,12 +244,9 @@ def run_rule_based_baseline(set_name):
 
     # patients = get_data_for_spec(set_spec, loader_type='bag', attribute='Sex',
     #                               muscles_to_use=None)
-
+    all_preds = []
     y_true = []
-    y_pred_old = []
-    y_pred_new = []
-    y_pred_new_mapped = []
-    handedness_mapping = {'L' : 'Links', 'R': 'Rechts'}
+    all_zscores = []
     z_score_encoder = MuscleZScoreEncoder('data/MUS_EI_models.json')
     with open('linear_regression_philips_to_esoate.pkl', 'rb') as f:
         lr_model = pickle.load(f)
@@ -192,66 +254,88 @@ def run_rule_based_baseline(set_name):
     for patient in patients:
         patient.select_latest()
         record = patient.get_selected_record()
-        # optionally transform using a naive model trained on patients with have multiple records on
-        mapped_EI = lr_model.predict(np.array(record.meta_info['EIs']).reshape(-1, 1)).tolist()
+        # predictions based on the original z-scores
+        all_preds.append(obtain_scores_and_preds(np.array(record.meta_info['EIZ']), record, 'original'))
+        all_zscores.append({'method': 'original' ,'data': np.array(record.meta_info['EIZ'])})
 
-        handedness = [handedness_mapping[x] for x in record.meta_info['Sides']]
-        muscles_to_encode = [{'Muscle': v1, 'Side': v2, 'EI': v3} for v1, v2, v3 in
-                             zip(record.meta_info['Muscles_list'], handedness, record.meta_info['EIs'])]
+        # prediction based on the z-score encoder for ESOATE
+        EIZ_from_EI = obtain_zscores(np.array(record.meta_info['EIs']), record, z_score_encoder)
+        all_zscores.append({'method': 'unadjusted_ei_esoate_eiz', 'data' : EIZ_from_EI})
+        all_preds.append(obtain_scores_and_preds(EIZ_from_EI, record,'unadjusted_ei_esoate_eiz'))
 
-        muscles_to_encode_mapped = [{'Muscle': v1, 'Side': v2, 'EI': v3} for v1, v2, v3 in
-                             zip(record.meta_info['Muscles_list'], handedness, mapped_EI)]
+        # prediction base
+        EI_regression = adjust_EI_with_regression(record,lr_model)
+        EIZ_regression = obtain_zscores(EI_regression, record, z_score_encoder)
+        all_zscores.append({'method': 'regression_ei_esoate_eiz', 'data': EIZ_regression})
+        all_preds.append(obtain_scores_and_preds(EIZ_regression, record, 'regression_ei_esoate_eiz'))
+
+        EI_adjustment = adjust_EI_with_factor(record, 1.4364508393285371)
+        EIZ_adjustment = obtain_zscores(EI_adjustment, record, z_score_encoder)
+        all_zscores.append({'method': 'adjusted_ei_esoate_eiz', 'data': EIZ_adjustment})
+        all_preds.append(obtain_scores_and_preds(EIZ_adjustment,record, 'adjusted_ei_esoate_eiz'))
+
+      #  EIZ_image = compute_EIZ_from_scratch(record, set_spec.img_root_path, z_score_encoder=z_score_encoder)
+      #  pred_dict_image = obtain_scores_and_preds(EIZ_image,record)
 
 
+        #  EIZ = np.array(record.meta_info['EIZ'])
 
-        EIZ = np.array(record.meta_info['EIZ'])
-        EIZ_new = z_score_encoder.encode_muscles(muscles_to_encode, record.meta_info)
-        EIZ_new_mapped = z_score_encoder.encode_muscles(muscles_to_encode_mapped, record.meta_info)
-        new_exceed_scores = compute_exceed_scores(EIZ_new)
-        new_exceed_scores['Age'] = record.meta_info['Age']
+        #     nan_inds = np.argwhere(np.isnan(EIZ))
+        #     EIZ_corr = np.delete(EIZ, nan_inds)
+        #     EIZ_new_corr = np.delete(EIZ_new, nan_inds)
+        #     r, _ = stats.pearsonr(EIZ_corr, EIZ_new_corr)
+        #    print(record.meta_info['RecordingDate'])
+        #    print(r)
 
-        new_exceed_scores_mapped = compute_exceed_scores(EIZ_new_mapped)
-        new_exceed_scores_mapped['Age'] = record.meta_info['Age']
-    #     nan_inds = np.argwhere(np.isnan(EIZ))
-    #     EIZ_corr = np.delete(EIZ, nan_inds)
-    #     EIZ_new_corr = np.delete(EIZ_new, nan_inds)
-    #     r, _ = stats.pearsonr(EIZ_corr, EIZ_new_corr)
-    #    print(record.meta_info['RecordingDate'])
-    #    print(r)
+        #     plt.plot(EIZ, EIZ_new, 'r*')
+        #     plt.show()
 
-    #     plt.plot(EIZ, EIZ_new, 'r*')
-    #     plt.show()
-        old_pred = predict_rule_based(record.meta_info)
-        new_pred = predict_rule_based(new_exceed_scores)
-        new_pred_mapped = predict_rule_based(new_exceed_scores_mapped)
-
-        y_pred_new.append(new_pred)
-        y_pred_new_mapped.append(new_pred_mapped)
-        y_pred_old.append(old_pred)
         y_true.append(patient.attributes['Class'])
 
-    pred_frame = pd.DataFrame({'old': y_pred_old, 'new': y_pred_new, 'new_mapped': y_pred_new_mapped})
+    pred_frame = pd.DataFrame(all_preds)
+    z_score_frame = pd.DataFrame(all_zscores)
 
-    y_pred_recall_biased = [elem if elem != 'unknown or uncertain' else 'NMD' for elem in y_pred_old]
-    y_pred_precision_biased = [elem if elem != 'unknown or uncertain' else 'no NMD' for elem in y_pred_old]
+    for method, group_frame in z_score_frame.groupby('method'):
+        all_scores = np.concatenate(group_frame.data.values)
+        nan_inds = np.argwhere(np.isnan(all_scores))
+        print(method)
+        print(describe(np.delete(all_scores, nan_inds)))
+
 
     p = np.array(patients)
 
+    error_frames = {}
+    # score all the methods
+    for method, group_frame in pred_frame.groupby('method'):
+        print(method)
+        preds = group_frame['pred']
+        y_pred_recall_biased = [elem if elem != 'unknown or uncertain' else 'NMD' for elem in preds]
+        y_pred_precision_biased = [elem if elem != 'unknown or uncertain' else 'no NMD' for elem in preds]
+        print('Focus on recall')
+        print(classification_report(y_true, y_pred_recall_biased))
+        print('Focus on precision')
+        print(classification_report(y_true, y_pred_precision_biased))
 
-    print('Focus on recall')
-    print(classification_report(y_true,y_pred_recall_biased))
-    errors = np.where(np.array(y_true) != np.array(y_pred_recall_biased))
-    info_dicts = []
-    x = p[errors]
-    for patient in x:
-        info = patient.get_selected_record().meta_info
-        info_dicts.append(info)
+        # error analysis
+        fps = np.where((np.array(y_true) == 'no NMD') & (np.array(y_pred_recall_biased) == 'NMD'))
+        fns = np.where((np.array(y_true) == 'NMD') & (np.array(y_pred_recall_biased) == 'no NMD'))
 
-    error_frame = pd.DataFrame(info_dicts)
+        info_dicts = []
+        x = p[fps]
+        for patient in x:
+            info = patient.get_selected_record().meta_info
+            info['error_type'] = 'fp'
+            info_dicts.append(info)
+        x = p[fns]
+        for patient in x:
+            info = patient.get_selected_record().meta_info
+            info['error_type'] = 'fn'
+            info_dicts.append(info)
+
+        error_frame = pd.DataFrame(info_dicts)
+        error_frames[method] = error_frame
 
 
-    print('Focus on precision')
-    print(classification_report(y_true, y_pred_precision_biased))
 
 def predict_rule_based(dict_with_exceed):
     if np.isnan(dict_with_exceed['NumberZscores']):
@@ -398,9 +482,29 @@ def align_records(record_a, record_b):
     return x
 
 
+def compute_brightness_diff():
+
+    att_spec_dict = make_att_specs()
+    set_spec_dict = get_default_set_spec_dict()
+    esoate_spec = set_spec_dict['Philips_iU22_train']
+    esoate_images = get_data_for_spec(esoate_spec, loader_type='image', dropna_values=False)
+    esoate_images = esoate_images[0:100]
+
+    transform = make_basic_transform('Philips_iU22', limit_image_size=False, to_tensor=True)
+
+    ds = SingleImageDataset(image_frame=esoate_images, root_dir=esoate_spec.img_root_path, attribute_specs=[att_spec_dict['Sex']],
+                            return_attribute_dict=False, transform=transform,
+                            use_one_channel=True)
+
+
+    mean, std  = compute_normalization_parameters(ds, 1)
+
+    print(mean)
+    print(std)
 
 
 if __name__ == '__main__':
-    analyze_multi_device_patients()
-    run_rule_based_baseline('ESAOTE_6100_val')
+ #   compute_brightness_diff()
+ #   analyze_multi_device_patients()
+    run_rule_based_baseline('Philips_iU22_val')
     run_dummy_baseline('ESAOTE_6100_val', 'Sex')

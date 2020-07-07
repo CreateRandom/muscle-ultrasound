@@ -14,7 +14,7 @@ from torchvision.transforms import transforms, CenterCrop, Resize
 
 from loading.datasets import PatientBagDataset, SingleImageDataset, \
     PatientRecord, Patient, AttributeSpec, ConcatDataset
-from loading.img_utils import FixedHeightCrop
+from loading.img_utils import FixedHeightCrop, BrightnessBoost
 
 
 def load_myositis_images(csv_path, muscles_to_use=None) -> pd.DataFrame:
@@ -36,7 +36,8 @@ def load_myositis_images(csv_path, muscles_to_use=None) -> pd.DataFrame:
     return image_frame
 
 normalizer_params = {'pretrained': {'mean': [0.485, 0.456, 0.406], 'std': [0.229, 0.224, 0.225]},
-                     'ESAOTE_6100': {'mean': [0.241], 'std': [0.141]},
+                     'ESAOTE_6100': {'mean': [0.2396], 'std': [0.1360]},
+                     'Philips_iU22': {'mean': [0.1668], 'std': [0.1507]},
                      'GE_Logiq_E': {'mean': [0.302], 'std': [0.828]}}
 
 resize_params = {'ESAOTE_6100': {'center_crop': (480, 503)},

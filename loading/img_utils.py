@@ -10,6 +10,7 @@ from PIL import Image
 from scipy.io import loadmat
 import numpy as np
 from skimage.draw import polygon2mask
+import torchvision.transforms.functional as TF
 
 def make_bbox_from_lines(lines):
     """
@@ -97,6 +98,16 @@ class FixedHeightCrop(object):
 
     def __repr__(self):
         return self.__class__.__name__ + '(remove_top={0}, remove_bottom={1})'.format(self.remove_top, self.remove_bottom)
+
+class BrightnessBoost:
+    """Rotate by one of the given angles."""
+
+    def __init__(self, brightness_factor):
+        self.brightness_factor = brightness_factor
+
+    def __call__(self, x):
+        return TF.adjust_brightness(x, self.brightness_factor)
+
 
 
 loader_funcs = {'.png': load_pil_img, '.jpg': load_pil_img, '.dcm': load_dicom}
