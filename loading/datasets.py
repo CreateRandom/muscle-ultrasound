@@ -115,8 +115,8 @@ class CustomLabelEncoder(object):
         return label_to_return
 
 
-def select_latest(patient):
-    return patient.select_latest()
+def default_record_selection(patient):
+    return patient.try_closest_fallback_to_latest()
 
 
 class PatientBagDataset(Dataset):
@@ -134,8 +134,8 @@ class PatientBagDataset(Dataset):
         self.return_attribute_dict = return_attribute_dict
         self.muscles_to_use = muscles_to_use
 
-        # a policy for record selection, TODO allow modification
-        self.select_record_for_patient = select_latest
+        # a policy for record selection
+        self.select_record_for_patient = default_record_selection
         self.patients = patient_list
         print(f'Loaded {len(self.patients)} patients.')
         for patient in self.patients:
@@ -271,6 +271,23 @@ class Patient(object):
                 date = record.meta_info['RecordingDate']
                 dates.append(date)
             self.record_to_use = np.argmax(dates, 0)
+            return True
+        return False
+
+    def select_closest(self):
+        if len(self.records) > 1 and not pandas.isnull(self.attributes['study_date']):
+            diffs = []
+            for record in self.records:
+                date = record.meta_info['RecordingDate']
+                diffs.append(np.abs(self.attributes['study_date'] - date))
+            self.record_to_use = np.argmin(diffs, 0)
+            return True
+        return False
+
+    def try_closest_fallback_to_latest(self):
+        could_select_closest = self.select_closest()
+        if not could_select_closest:
+            self.select_latest()
 
     def make_pseudopatients(self, muscles=None, method='each_once', n_limit=100):
         record = self.records[self.record_to_use]

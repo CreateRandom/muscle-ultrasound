@@ -252,7 +252,7 @@ def run_rule_based_baseline(set_name):
         lr_model = pickle.load(f)
 
     for patient in patients:
-        patient.select_latest()
+        patient.try_closest_fallback_to_latest()
         record = patient.get_selected_record()
         # predictions based on the original z-scores
         all_preds.append(obtain_scores_and_preds(np.array(record.meta_info['EIZ']), record, 'original'))
@@ -311,9 +311,9 @@ def run_rule_based_baseline(set_name):
         preds = group_frame['pred']
         y_pred_recall_biased = [elem if elem != 'unknown or uncertain' else 'NMD' for elem in preds]
         y_pred_precision_biased = [elem if elem != 'unknown or uncertain' else 'no NMD' for elem in preds]
-        print('Focus on recall')
+        print('Unclear --> NMD')
         print(classification_report(y_true, y_pred_recall_biased))
-        print('Focus on precision')
+        print('Unclear --> no NMD')
         print(classification_report(y_true, y_pred_precision_biased))
 
         # error analysis
@@ -334,6 +334,7 @@ def run_rule_based_baseline(set_name):
 
         error_frame = pd.DataFrame(info_dicts)
         error_frames[method] = error_frame
+        print(error_frame.groupby(['error_type', 'cramp']).count())
 
 
 
@@ -507,4 +508,4 @@ if __name__ == '__main__':
  #   compute_brightness_diff()
  #   analyze_multi_device_patients()
     run_rule_based_baseline('Philips_iU22_val')
-    run_dummy_baseline('ESAOTE_6100_val', 'Sex')
+    run_dummy_baseline('Philips_iU22_val', 'Class')
