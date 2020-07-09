@@ -1,7 +1,8 @@
 import warnings
 
 from loading.datasets import problem_kind, make_att_specs, ConcatDataset
-from loading.loaders import make_bag_loader, get_data_for_spec, get_classes, make_bag_dataset, wrap_in_bag_loader
+from loading.loaders import make_bag_loader, get_data_for_spec, get_classes, make_bag_dataset, wrap_in_bag_loader, \
+    make_basic_transform
 from loading.loading_utils import make_set_specs
 from models.multi_input import MultiInputNet
 import os
@@ -195,20 +196,21 @@ def train_multi_input(config):
                           'Vastus lateralis']
 
     dataset_storage = {}
+    train_transform_params = None
     for set_name, set_spec_list in desired_set_specs.items():
         datasets = []
         # bag_loaders = []
         for set_spec in set_spec_list:
             print(set_spec)
             # always drop na values for the validation or test set
-            dropna_values_set = dropna_values if (set_name == 'train') else True
+            dropna_values_set = dropna_values if ('train' in set_name) else True
             # pass the classes in to ensure that only those are present in all the sets
             patients = get_data_for_spec(set_spec, loader_type='bag', attribute_to_filter=attribute,
                                          legal_attribute_values=train_classes,
                                          muscles_to_use=muscles_to_use, boolean_subset_attribute=filter_attribute,
                                          dropna_values=dropna_values_set)
 
-            patients = patients[0:10]
+          #  patients = patients[0:10]
             print(f'Loaded {len(patients)} elements.')
 
             img_path = set_spec.img_root_path
@@ -220,8 +222,17 @@ def train_multi_input(config):
             #                          pin_memory=use_cuda, return_attribute_dict=True)
             # bag_loaders.append(loader)
 
-            ds = make_bag_dataset(patients, img_path, use_one_channel, normalizer_name,
-                                     attribute_specs, set_spec.device, limit_image_size=limit_image_size,
+            transform_params = {'resize_option_name' : set_spec.device, 'normalizer_name': normalizer_name,
+                                'limit_image_size': limit_image_size}
+
+            # store the transform params used for training
+            if set_name == 'source_train':
+                train_transform_params = transform_params
+
+            transform = make_basic_transform(**transform_params)
+
+            ds = make_bag_dataset(patients, img_path, use_one_channel=use_one_channel,
+                                     attribute_specs=attribute_specs, transform=transform,
                                      use_pseudopatients=use_pseudopatient_locally,
                                      return_attribute_dict=True)
 
@@ -254,19 +265,15 @@ def train_multi_input(config):
             bag_loaders.append(loader)
         set_loaders[set_name] = bag_loaders
 
-    # create the desired model
-    model = MultiInputNet(att_specs=attribute_specs, backend=backend, mil_pooling=mil_pooling,
-                      pooling_kwargs=pooling_kwargs,
-                      mode=mil_mode,
-                      fc_hidden_layers=fc_hidden_layers, fc_use_bn=fc_use_bn,
-                      backend_cutoff=backend_cutoff,
-                      backend_kwargs=backend_kwargs)
-    
     model_param_dict = {'att_specs' : attribute_specs, 'backend': backend, 'mil_pooling' : mil_pooling,
                       'pooling_kwargs': pooling_kwargs, 'mode':mil_mode, 'fc_hidden_layers':fc_hidden_layers,
                       'fc_use_bn': fc_use_bn,
                       'backend_cutoff':backend_cutoff,
                       'backend_kwargs':backend_kwargs}
+
+
+    # create the desired model
+    model = MultiInputNet(**model_param_dict)
 
     n_params_backend = pytorch_count_params(model.backend)
     n_params_classifier = pytorch_count_params(model.heads[attribute])
@@ -405,8 +412,10 @@ def train_multi_input(config):
 
     checkpoint_dir = 'checkpoints'
 
-    # checkpointer = ModelCheckpoint(checkpoint_dir, 'pref', n_saved=3, create_dir=True, require_empty=False)
-    # trainer.add_event_handler(Events.EPOCH_COMPLETED(every=1), checkpointer, {'model_state_dict': model, 'model_param_dict': StateDictWrapper(model_param_dict)})
+    checkpointer = ModelCheckpoint(checkpoint_dir, 'pref', n_saved=3, create_dir=True, require_empty=False)
+    trainer.add_event_handler(Events.EPOCH_COMPLETED(every=1), checkpointer,
+                              {'model_state_dict': model, 'model_param_dict': StateDictWrapper(model_param_dict),
+                               'transform_dict': StateDictWrapper(train_transform_params)})
 
     @trainer.on(Events.EPOCH_COMPLETED)
     def log_results(trainer):

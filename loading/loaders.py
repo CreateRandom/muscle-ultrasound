@@ -57,22 +57,23 @@ resize_params_limited = {'ESAOTE_6100': {'center_crop': (480, 480), 'resize': (2
 # center philips to the corresponding 561 * 588, then scale down
 def make_basic_transform(resize_option_name, normalizer_name=None, to_tensor=True, limit_image_size=False):
     t_list = []
-    if limit_image_size:
-        resize_dict = resize_params_limited[resize_option_name]
-    else:
-        resize_dict = resize_params[resize_option_name]
+    if resize_option_name:
+        if limit_image_size:
+            resize_dict = resize_params_limited[resize_option_name]
+        else:
+            resize_dict = resize_params[resize_option_name]
 
-    if 'fixed_height' in resize_dict:
-        resize_tuple = resize_dict['fixed_height']
-        t_list.append(FixedHeightCrop(remove_top=resize_tuple[0], remove_bottom=resize_tuple[1]))
-    if 'center_crop' in resize_dict:
-        img_size = resize_dict['center_crop']
-        center_crop = CenterCrop(img_size)
-        t_list.append(center_crop)
-    if 'resize' in resize_dict:
-        img_size = resize_dict['resize']
-        resize = Resize(img_size)
-        t_list.append(resize)
+        if 'fixed_height' in resize_dict:
+            resize_tuple = resize_dict['fixed_height']
+            t_list.append(FixedHeightCrop(remove_top=resize_tuple[0], remove_bottom=resize_tuple[1]))
+        if 'center_crop' in resize_dict:
+            img_size = resize_dict['center_crop']
+            center_crop = CenterCrop(img_size)
+            t_list.append(center_crop)
+        if 'resize' in resize_dict:
+            img_size = resize_dict['resize']
+            resize = Resize(img_size)
+            t_list.append(resize)
     if to_tensor:
         # toTensor automatically scales between 0 and 1
         t_list.append(transforms.ToTensor())
@@ -258,10 +259,8 @@ def get_n_cpu():
     return n_cpu
 
 
-def make_bag_dataset(patients: List[Patient], img_folder, use_one_channel, normalizer_name, attribute_specs,
-                    device, limit_image_size, return_attribute_dict= False,
-                    use_pseudopatients=False):
-    transform = make_basic_transform(device, normalizer_name=normalizer_name, limit_image_size=limit_image_size)
+def make_bag_dataset(patients: List[Patient], img_folder, use_one_channel, attribute_specs,
+                    transform,return_attribute_dict= False, use_pseudopatients=False):
     # TODO allow comparison of different methods for using pseudopatients
     ds = PatientBagDataset(patient_list=patients, root_dir=img_folder,
                            attribute_specs= attribute_specs, transform=transform, use_pseudopatients=use_pseudopatients,
