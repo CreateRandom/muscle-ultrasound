@@ -7,11 +7,13 @@ import torch
 from PIL import Image
 from captum.attr._utils.visualization import _normalize_image_attr
 from torch import nn
-from captum.attr import Saliency, DeepLift
+from captum.attr import Saliency
 from captum.attr import visualization as viz
 
+import matplotlib.pyplot as plt
+
 from deployment.multi_level_inference import load_model_from_checkpoint, load_transform_from_checkpoint
-from utils.metric_utils import _binarize_sigmoid
+from utils.binarize_utils import _binarize_sigmoid
 
 
 def expand_to_3d(img_array):
@@ -98,8 +100,12 @@ if __name__ == '__main__':
             norm_grad = _normalize_image_attr(img_grad.numpy(), sign="all", outlier_perc=2)
             norm_grads.append(norm_grad)
             att_score = results['attention_outputs'][0][i]
-            viz.visualize_image_attr(img_grad.numpy(), original_image, method="blended_heat_map",
-                                    alpha_overlay=0.5, sign="all", show_colorbar=False, title=att_score)
+            title = 'Attention = ' + str(np.round(att_score,2))
+            fig, ax = viz.visualize_image_attr(img_grad.numpy(), original_image, method="blended_heat_map",
+                                    alpha_overlay=0.5, sign="absolute_value", show_colorbar=False, title=title)
+            out_path = os.path.join('../output/images', (str(i) + '.png'))
+
+            fig.savefig(out_path)
 
         # stack up the activation maps
         grad_output = np.stack(norm_grads)

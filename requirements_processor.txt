@@ -1,0 +1,5 @@
+itk==5.1.0.post3
+captum==0.2.0
+torch==1.4.0
+PIL==7.1.2
+pandas==1.0.5

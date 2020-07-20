@@ -6,7 +6,8 @@ from ignite.engine import _prepare_batch, Engine, DeterministicEngine
 from ignite.metrics import Metric
 
 from utils.coral import coral
-from utils.metric_utils import loss_mapping
+from utils.ignite_metrics import loss_mapping
+
 
 def compute_classification_loss(head_preds, y, att_specs, loss_weights=None):
     if not loss_weights:

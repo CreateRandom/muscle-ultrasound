@@ -20,10 +20,10 @@ from training_utils import fix_seed
 from ignite.contrib.handlers.neptune_logger import NeptuneLogger, OutputHandler, WeightsScalarHandler, \
     GradsScalarHandler
 
-from utils.ignite_utils import create_bag_attention_trainer, create_bag_attention_evaluator, create_da_trainer, \
+from utils.trainers import create_bag_attention_trainer, create_bag_attention_evaluator, create_da_trainer, \
     StateDictWrapper
 from utils.utils import pytorch_count_params
-from utils.metric_utils import obtain_metrics, Variance, Average, Minimum, Maximum
+from utils.ignite_metrics import Variance, Average, Minimum, Maximum, obtain_metrics
 from utils.tokens import NEPTUNE_API_TOKEN
 
 def train_multi_input(config):
@@ -157,8 +157,7 @@ def train_multi_input(config):
     # listen to user specified input in case it is multihead, else, always drop na values
     dropna_values = drop_na_main_attribute_values if multihead else True
 
-    # TODO only change this for val and test?
-    filter_attribute = 'Class_sample' if attribute == 'Class' else None
+    # filter_attribute = 'Class_sample' if attribute == 'Class' else None
 
     # this is always needed
     source_train = config.get('source_train')
@@ -166,7 +165,7 @@ def train_multi_input(config):
     val = config.get('val')
 
     # 'target_train': SetSpec('Philips_iU22', 'umc', 'train', umc_data_path)
-    desired_set_specs = {'source_train': source_train, 'target_train' : target_train,
+    desired_set_specs = {'source_train': source_train, 'target_train': target_train,
                          'val': val}
 
     # yields a mapping from names to set_specs
@@ -207,7 +206,7 @@ def train_multi_input(config):
             # pass the classes in to ensure that only those are present in all the sets
             patients = get_data_for_spec(set_spec, loader_type='bag', attribute_to_filter=attribute,
                                          legal_attribute_values=train_classes,
-                                         muscles_to_use=muscles_to_use, boolean_subset_attribute=filter_attribute,
+                                         muscles_to_use=muscles_to_use,
                                          dropna_values=dropna_values_set)
 
           #  patients = patients[0:10]
@@ -442,10 +441,10 @@ if __name__ == '__main__':
     bag_config = {'problem_type': 'bag', 'prediction_target': 'Class', 'backend_mode': 'finetune',
                   'backend': 'resnet-18', 'mil_pooling': 'attention', 'attention_mode': 'sigmoid',
                   'mil_mode': 'embedding', 'batch_size': 4, 'lr': 0.0269311, 'n_epochs': 5,
-                  'use_pseudopatients': True, 'fc_hidden_layers': 2, 'fc_use_bn': True,
+                  'use_pseudopatients': False, 'fc_hidden_layers': 2, 'fc_use_bn': True,
                   'backend_cutoff': 1}
 
-    only_philips = {'source_train': 'Philips_iU22_train',
+    only_philips = {'source_train': 'Philips_iU22_train+val',
                          'val': 'Philips_iU22_val'}
 
     only_esaote = {'source_train': 'ESAOTE_6100_train',
@@ -453,6 +452,6 @@ if __name__ == '__main__':
 
     da = {'source_train': 'ESAOTE_6100_train', 'target_train': 'Philips_iU22_train',
                          'val': ['ESAOTE_6100_val', 'Philips_iU22_val']}
-    config = {**bag_config, **only_esaote}
+    config = {**bag_config, **only_philips}
 
     train_multi_input(config)

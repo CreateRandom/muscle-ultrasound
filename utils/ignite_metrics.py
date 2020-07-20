@@ -2,12 +2,12 @@ from collections import Counter
 from typing import Callable, Optional, Union, Any, Sequence
 
 import numpy as np
-from ignite.metrics import Accuracy, Precision, Recall, MeanAbsoluteError, Metric, Loss
-from ignite.metrics.metric import reinit__is_reduced
-from torch import nn
-
 import torch
+from ignite.metrics import Metric, Loss, MeanAbsoluteError, Accuracy, Precision, Recall
+from ignite.metrics.metric import reinit__is_reduced
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
+
+from utils.binarize_utils import binarize_sigmoid, binarize_softmax
 
 
 class SimpleAccumulator(Metric):
@@ -52,35 +52,6 @@ class Variance(SimpleAccumulator):
 class Average(SimpleAccumulator):
     def compute(self) -> Any:
         return np.mean(self.values)
-
-
-def _binarize_softmax(y_pred):
-    sm = nn.Softmax(dim=1)(y_pred)
-    _, i = torch.max(sm, dim=1)
-    return i
-
-
-def _binarize_sigmoid(y_pred):
-    y_pred = nn.Sigmoid()(y_pred)
-    y_pred = torch.ge(y_pred, 0.5).int()
-    return y_pred
-
-
-def binarize_softmax(output):
-    y_pred, y = output['y_pred'], output['y']
-    sm = nn.Softmax(dim=1)(y_pred)
-    _, i = torch.max(sm, dim=1)
-    # y_pred = i
-
-    y_pred = torch.nn.functional.one_hot(i, sm.shape[1])
-    # y = torch.nn.functional.one_hot(y,sm.shape[1])
-    return y_pred, y
-
-
-def binarize_sigmoid(output):
-    y_pred, y = output['y_pred'], output['y']
-    y_pred = _binarize_sigmoid(y_pred)
-    return (y_pred, y)
 
 
 class ErrorIndices(Metric):
@@ -165,10 +136,9 @@ class CustomLossWrapper(Loss):
         self._sum += average_loss.item() * N
         self._num_examples += N
 
+
 loss_mapping = {'binary': BCEWithLogitsLoss(),'multi': CrossEntropyLoss(),
                 'regression': MSELoss()}
-
-
 default_metric_mapping = {
     'regression': [('mae', MeanAbsoluteError, None, {}),
                    ('mean', Average, lambda output: output['y_pred'], {}),
@@ -188,7 +158,6 @@ default_metric_mapping = {
 }
 
 
-# extracts the subdictionary for prediction and target, leaves the rest unaltered
 def map_output_dict(output_dict, attribute_name):
     new_dict = {}
     if attribute_name:

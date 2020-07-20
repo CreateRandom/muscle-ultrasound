@@ -373,12 +373,12 @@ def image_frame_to_patients(frame) -> List[Patient]:
 class SetSpec:
     device: str
     dataset_type: str
-    split: str
+    splits: List[str]
     label_path: str
     img_root_path: str
 
     def __str__(self):
-        return self.device + '/' + self.split
+        return self.device + '/' + '+'.join(self.splits)
 
 def get_classes(data: Union[pd.DataFrame, List[Patient]], attribute):
     if isinstance(data,pd.DataFrame):
@@ -397,51 +397,66 @@ def get_data_for_spec(set_spec : SetSpec, loader_type='bag', attribute_to_filter
     device_name = set_spec.device
 
     if dataset_type == 'umc':
-        # e.g. ESAOTE_6100/train
-        set_path = os.path.join(device_name, set_spec.split)
-        to_load = os.path.join(data_path, set_path)
-
         if loader_type == 'bag':
-            patients = umc_to_patient_list(os.path.join(to_load, 'patients.pkl'),
-                                           os.path.join(to_load, 'records.pkl'),
-                                           os.path.join(to_load, 'images.pkl'),
-                                           attribute_to_filter=attribute_to_filter, boolean_subset_attribute=boolean_subset_attribute,
-                                           legal_attribute_values=legal_attribute_values, muscles_to_use=muscles_to_use,
-                                           dropna=dropna_values)
-            return patients
+            all_patients = []
+            for split in set_spec.splits:
+                # e.g. ESAOTE_6100/train
+                set_path = os.path.join(device_name, split)
+                to_load = os.path.join(data_path, set_path)
+
+                all_patients.extend(umc_to_patient_list(os.path.join(to_load, 'patients.pkl'),
+                                               os.path.join(to_load, 'records.pkl'),
+                                               os.path.join(to_load, 'images.pkl'),
+                                               attribute_to_filter=attribute_to_filter, boolean_subset_attribute=boolean_subset_attribute,
+                                               legal_attribute_values=legal_attribute_values, muscles_to_use=muscles_to_use,
+                                               dropna=dropna_values))
+            return all_patients
 
         elif loader_type == 'image':
+            all_image_frames = []
+            for split in set_spec.splits:
+                # e.g. ESAOTE_6100/train
+                set_path = os.path.join(device_name, split)
+                to_load = os.path.join(data_path, set_path)
 
-            images = umc_to_image_frame(os.path.join(to_load, 'patients.pkl'),
-                                        os.path.join(to_load, 'records.pkl'),
-                                        os.path.join(to_load, 'images.pkl'),
-                                        attribute_to_filter=attribute_to_filter, boolean_subset_attribute=boolean_subset_attribute,
-                                        legal_attribute_values=legal_attribute_values, muscles_to_use=muscles_to_use,
-                                        dropna=dropna_values)
+                all_image_frames.append(umc_to_image_frame(os.path.join(to_load, 'patients.pkl'),
+                                            os.path.join(to_load, 'records.pkl'),
+                                            os.path.join(to_load, 'images.pkl'),
+                                            attribute_to_filter=attribute_to_filter, boolean_subset_attribute=boolean_subset_attribute,
+                                            legal_attribute_values=legal_attribute_values, muscles_to_use=muscles_to_use,
+                                            dropna=dropna_values))
 
-            return images
+            return pd.concat(all_image_frames)
 
         raise ValueError(f'Unknown loader type {loader_type}')
 
     elif dataset_type == 'jhu':
-        csv_name = set_spec.split + '.csv'
-        to_load = os.path.join(data_path, csv_name)
-        image_frame = load_myositis_images(to_load, muscles_to_use=muscles_to_use)
+        all_elems = []
+        for split in set_spec.splits:
+            csv_name = split + '.csv'
+            to_load = os.path.join(data_path, csv_name)
+            image_frame = load_myositis_images(to_load, muscles_to_use=muscles_to_use)
 
-        if legal_attribute_values:
-            drop_values = set(image_frame[~image_frame[attribute_to_filter].isin(legal_attribute_values)][attribute_to_filter])
-            if drop_values:
-                image_frame = image_frame[image_frame[attribute_to_filter].isin(legal_attribute_values)]
-                print(
-                    f'Retained {len(image_frame)} images after dropping {drop_values}.')
+            if legal_attribute_values:
+                drop_values = set(image_frame[~image_frame[attribute_to_filter].isin(legal_attribute_values)][attribute_to_filter])
+                if drop_values:
+                    image_frame = image_frame[image_frame[attribute_to_filter].isin(legal_attribute_values)]
+                    print(
+                        f'Retained {len(image_frame)} images after dropping {drop_values}.')
+
+            if loader_type == 'bag':
+                patient_list = image_frame_to_patients(image_frame)
+                all_elems.extend(patient_list)
+
+            elif loader_type == 'image':
+                all_elems.append(image_frame)
+
+            raise ValueError(f'Unknown loader type {loader_type}')
 
         if loader_type == 'bag':
-            return image_frame_to_patients(image_frame)
-
-        elif loader_type == 'image':
-            return image_frame
-
-        raise ValueError(f'Unknown loader type {loader_type}')
+            return all_elems
+        else:
+            return pd.concat(all_elems)
 
     else:
         raise ValueError(f'Data type {dataset_type} not understood.')

@@ -20,7 +20,7 @@ from ignite.contrib.handlers.neptune_logger import NeptuneLogger, OutputHandler,
     GradsScalarHandler
 
 from utils.utils import pytorch_count_params
-from utils.metric_utils import obtain_metrics, PositiveShare, Variance, Average, loss_mapping
+from utils.ignite_metrics import PositiveShare, Variance, Average, loss_mapping, obtain_metrics
 from utils.tokens import NEPTUNE_API_TOKEN
 
 
@@ -143,7 +143,7 @@ def train_image_level(config):
     set_loaders['image'] = {}
 
     train_classes = att_spec_dict[attribute].legal_values
-    filter_attribute = 'Class_sample' if attribute == 'Class' else None
+   # filter_attribute = 'Class_sample' if attribute == 'Class' else None
 
     muscles_to_use = None
     use_most_frequent_muscles = config.get('muscle_subset', False)
@@ -161,7 +161,7 @@ def train_image_level(config):
             # pass the classes in to ensure that only those are present in all the sets
             patients = get_data_for_spec(set_spec, loader_type='bag', attribute_to_filter=attribute,
                                          legal_attribute_values=train_classes,
-                                         muscles_to_use=muscles_to_use, boolean_subset_attribute=filter_attribute,
+                                         muscles_to_use=muscles_to_use,
                                          dropna_values=True)
             print(f'Loaded {len(patients)} elements.')
 
@@ -177,7 +177,7 @@ def train_image_level(config):
             # make the image loader
             images = get_data_for_spec(set_spec, loader_type='image', attribute_to_filter=attribute,
                                        legal_attribute_values=train_classes,
-                                       muscles_to_use=muscles_to_use, boolean_subset_attribute=filter_attribute,
+                                       muscles_to_use=muscles_to_use,
                                        dropna_values=True)
 
             

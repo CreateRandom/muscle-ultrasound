@@ -6,7 +6,7 @@ from torch import nn, Tensor
 import numpy as np
 from models.mil_pooling import MaxMIL, AttentionMIL, AverageMIL, GatedAttentionMIL
 from models.premade import make_resnet_18, make_alexnet
-from utils.metric_utils import _binarize_softmax, _binarize_sigmoid
+from utils.binarize_utils import _binarize_softmax, _binarize_sigmoid
 
 
 class MultiInputAlexNet(nn.Module):
