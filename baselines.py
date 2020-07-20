@@ -154,11 +154,10 @@ def get_default_set_spec_dict():
 def run_dummy_baseline(set_name, attribute):
     set_spec_dict = get_default_set_spec_dict()
     set_spec = set_spec_dict[set_name]
-    filter_attribute = 'Class_sample' if attribute == 'Class' else None
     class_values = problem_legal_values[attribute] if attribute in problem_legal_values else None
     patients = get_data_for_spec(set_spec, loader_type='bag', attribute_to_filter=attribute,
                                  legal_attribute_values=class_values,
-                                 muscles_to_use=None, boolean_subset_attribute=filter_attribute)
+                                 muscles_to_use=None)
 
     y_true = [patient.attributes[attribute] for patient in patients]
 
@@ -240,7 +239,7 @@ def run_rule_based_baseline(set_name):
     set_spec = set_spec_dict[set_name]
     patients = get_data_for_spec(set_spec, loader_type='bag', attribute_to_filter='Class',
                                  legal_attribute_values=problem_legal_values['Class'],
-                                 muscles_to_use=None, boolean_subset_attribute='Class_sample')
+                                 muscles_to_use=None)
 
     # patients = get_data_for_spec(set_spec, loader_type='bag', attribute='Sex',
     #                               muscles_to_use=None)
@@ -436,7 +435,7 @@ def analyze_multi_device_patients():
         match_table.append(align_records(p, e))
 
     total = pd.concat(match_table)
-
+    total.reset_index(inplace=True, drop=True)
 
     total.to_pickle('multi_patients_aligned.pkl')
 
