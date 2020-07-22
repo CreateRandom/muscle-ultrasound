@@ -88,7 +88,7 @@ class SingleImageDataset(Dataset):
 
 class CustomLabelEncoder(object):
     def __init__(self, att_list, one_hot_encode):
-        self.classes = list(set(att_list))
+        self.classes = att_list
         self.one_hot_encode = one_hot_encode
         self.is_binary = len(self.classes) == 2
         if self.is_binary and self.one_hot_encode:

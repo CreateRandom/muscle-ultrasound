@@ -13,19 +13,23 @@ from torch import optim
 from ignite.engine import Events, create_supervised_trainer, create_supervised_evaluator
 from ignite.metrics import Accuracy, Precision, Recall, MeanAbsoluteError
 from ignite.contrib.handlers import ProgressBar
-from ignite.handlers import global_step_from_engine
+from ignite.handlers import global_step_from_engine, ModelCheckpoint
 
 # import logging
 from ignite.contrib.handlers.neptune_logger import NeptuneLogger, OutputHandler, WeightsScalarHandler, \
     GradsScalarHandler
 
+from utils.binarize_utils import binarize_sigmoid, apply_sigmoid
+from utils.trainers import StateDictWrapper
 from utils.utils import pytorch_count_params
-from utils.ignite_metrics import PositiveShare, Variance, Average, loss_mapping, obtain_metrics
+from utils.ignite_metrics import PositiveShare, Variance, Average, loss_mapping, obtain_metrics, AUC, \
+    default_metric_mapping
 from utils.tokens import NEPTUNE_API_TOKEN
 
 
 def train_image_level(config):
     print(config)
+    config['problem_type'] = 'image'
     seed = config.get('seed', 42)
     fix_seed(seed)
 
@@ -65,7 +69,7 @@ def train_image_level(config):
     attribute_specs = [att_spec_dict[attribute]]
 
     label_type = problem_kind[attribute]
-    is_classification = (label_type == 'multi' or (label_type == 'binary'))
+    config['label_type'] = label_type
     is_multi = (label_type == 'multi')
     # TRAINING ASPECTS
     batch_size = config.get('batch_size', 4)
@@ -78,6 +82,7 @@ def train_image_level(config):
     n_epochs = config.get('n_epochs', 20)
 
     in_channels = 1 if use_one_channel else 3
+    config['in_channels'] = in_channels
     # hand over to backend
     backend_kwargs = {'pretrained': pretrained, 'feature_extraction': feature_extraction, 'in_channels': in_channels}
 
@@ -151,6 +156,7 @@ def train_image_level(config):
         muscles_to_use = ['Biceps brachii', 'Tibialis anterior', 'Gastrocnemius medial head', 'Flexor carpi radialis',
                           'Vastus lateralis']
 
+    train_transform_params = None
     for set_name, set_spec_list in desired_set_specs.items():
 
         bag_loaders = []
@@ -163,6 +169,8 @@ def train_image_level(config):
                                          legal_attribute_values=train_classes,
                                          muscles_to_use=muscles_to_use,
                                          dropna_values=True)
+
+          #  patients = patients[0:10]
             print(f'Loaded {len(patients)} elements.')
 
             img_path = set_spec.img_root_path
@@ -179,12 +187,19 @@ def train_image_level(config):
                                        legal_attribute_values=train_classes,
                                        muscles_to_use=muscles_to_use,
                                        dropna_values=True)
-
+        #    images = images.sample(n=250)
             
             image_loader = make_image_loader(images, img_path, use_one_channel, normalizer_name,
                                              attribute_specs, batch_size, set_spec.device, limit_image_size=limit_image_size,
                                              pin_memory=use_cuda, is_multi=is_multi, return_multiple_atts= False)
             image_loaders.append(image_loader)
+
+            transform_params = {'resize_option_name' : set_spec.device, 'normalizer_name': normalizer_name,
+                                'limit_image_size': limit_image_size}
+
+            # store the transform params used for training
+            if set_name == 'source_train':
+                train_transform_params = transform_params
 
         set_loaders['bag'][set_name] = bag_loaders
         set_loaders['image'][set_name] = image_loaders
@@ -289,22 +304,13 @@ def train_image_level(config):
 
     # add patient level baseline evaluators for the image level
 
-    bag_metric_mapping = {
-        'regression': [('mae', MeanAbsoluteError, None, {}),
-                       ('mean', Average, lambda output: output['y_pred'], {}),
-                       ('var', Variance, lambda output: output['y_pred'], {})],
-
-        'binary': [('accuracy', Accuracy, None, {}),
-                   ('p', Precision, None, {}),
-                   ('r', Recall, None, {}),
-                   ('pos_share', PositiveShare, None, {})],
-
-        'multi': [
-            ('accuracy', Accuracy, None, {}),
-            ('ap', Precision, None, {'average': True}),
-            ('ar', Recall, None, {'average': True})
-        ]
-    }
+    bag_metric_mapping = {'regression': [('mae', MeanAbsoluteError, None, {}),
+                                         ('mean', Average, lambda output: output['y_pred'], {}),
+                                         ('var', Variance, lambda output: output['y_pred'], {})], 'multi': [
+        ('accuracy', Accuracy, None, {}),
+        ('ap', Precision, None, {'average': True}),
+        ('ar', Recall, None, {'average': True})
+    ], 'binary': default_metric_mapping['binary']}
 
     bag_level_metrics = obtain_metrics(attribute_specs, extract_multiple_atts=False, metric_mapping=bag_metric_mapping,
                                        add_loss=False)
@@ -338,10 +344,20 @@ def train_image_level(config):
     pbar = ProgressBar()
     pbar.attach(trainer)
 
-    checkpoint_dir = 'checkpoints'
+    # make checkpoint dir based on contents of config
+    try:
+        exp_id = npt_logger.get_experiment()._id
+        checkpoint_dir = os.path.join('checkpoints', project_name, exp_id)
+        os.makedirs(checkpoint_dir, exist_ok=True)
+    except:
+        checkpoint_dir = 'checkpoints'
 
-    # checkpointer = ModelCheckpoint(checkpoint_dir, 'pref', n_saved=3, create_dir=True, require_empty=False)
-    # trainer.add_event_handler(Events.EPOCH_COMPLETED(every=1), checkpointer, {'mymodel': model})
+    checkpointer = ModelCheckpoint(checkpoint_dir, 'pref', create_dir=True, require_empty=False, n_saved=None,
+                                   global_step_transform=global_step_from_engine(trainer))
+    trainer.add_event_handler(Events.EPOCH_COMPLETED(every=1), checkpointer,
+                              {'model_state_dict': model, 'model_param_dict': StateDictWrapper(backend_kwargs),
+                               'transform_dict': StateDictWrapper(train_transform_params),
+                               'config': StateDictWrapper(config)})
 
     @trainer.on(Events.EPOCH_COMPLETED)
     def log_results(trainer):

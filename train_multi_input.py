@@ -28,6 +28,7 @@ from utils.tokens import NEPTUNE_API_TOKEN
 
 def train_multi_input(config):
     print(config)
+    config['problem_type'] = 'bag'
     seed = config.get('seed', 42)
     fix_seed(seed)
 
@@ -90,6 +91,7 @@ def train_multi_input(config):
     n_epochs = config.get('n_epochs', 20)
 
     in_channels = 1 if use_one_channel else 3
+    config['in_channels'] = in_channels
     # hand over to backend
     backend_kwargs = {'pretrained': pretrained, 'feature_extraction': feature_extraction, 'in_channels': in_channels}
 
@@ -209,7 +211,7 @@ def train_multi_input(config):
                                          muscles_to_use=muscles_to_use,
                                          dropna_values=dropna_values_set)
 
-          #  patients = patients[0:10]
+            patients = patients[0:40]
             print(f'Loaded {len(patients)} elements.')
 
             img_path = set_spec.img_root_path
@@ -295,9 +297,10 @@ def train_multi_input(config):
         base_dict = {
             "y": y,
             "y_pred": y_pred['preds'],
-            "atts": y_pred['atts'],
             "loss": loss.item()
         }
+        if 'atts' in y_pred:
+            base_dict['atts'] = y_pred['atts']
         if 'coral_losses' in y_pred:
             base_dict['coral_losses'] = y_pred['coral_losses']
         return base_dict
@@ -357,12 +360,13 @@ def train_multi_input(config):
                       event_name=Events.EPOCH_COMPLETED)
 
     def custom_output_transform_eval(x, y, y_pred):
-        return {
+        base_dict = {
             "y": y,
             "y_pred": y_pred['preds'],
-            "atts": y_pred['atts'],
         }
-
+        if 'atts' in y_pred:
+            base_dict['atts'] = y_pred['atts']
+        return base_dict
 
     # only if desired incur the extra overhead
     if log_training_metrics_clean:
@@ -409,12 +413,19 @@ def train_multi_input(config):
     pbar = ProgressBar()
     pbar.attach(trainer)
 
-    checkpoint_dir = 'checkpoints'
+    # make checkpoint dir based on contents of config
+    try:
+        exp_id = npt_logger.get_experiment()._id
+        checkpoint_dir = os.path.join('checkpoints', project_name, exp_id)
+        os.makedirs(checkpoint_dir,exist_ok=True)
+    except:
+        checkpoint_dir = 'checkpoints'
 
-    checkpointer = ModelCheckpoint(checkpoint_dir, 'pref', n_saved=3, create_dir=True, require_empty=False)
+    checkpointer = ModelCheckpoint(checkpoint_dir, 'pref', create_dir=True, require_empty=False, n_saved=None,
+                                   global_step_transform= global_step_from_engine(trainer))
     trainer.add_event_handler(Events.EPOCH_COMPLETED(every=1), checkpointer,
                               {'model_state_dict': model, 'model_param_dict': StateDictWrapper(model_param_dict),
-                               'transform_dict': StateDictWrapper(train_transform_params)})
+                               'transform_dict': StateDictWrapper(train_transform_params), 'config': StateDictWrapper(config)})
 
     @trainer.on(Events.EPOCH_COMPLETED)
     def log_results(trainer):
@@ -439,12 +450,12 @@ def train_multi_input(config):
 if __name__ == '__main__':
     # TODO read out from argparse
     bag_config = {'problem_type': 'bag', 'prediction_target': 'Class', 'backend_mode': 'finetune',
-                  'backend': 'resnet-18', 'mil_pooling': 'attention', 'attention_mode': 'sigmoid',
+                  'backend': 'resnet-18', 'mil_pooling': 'mean', 'attention_mode': 'sigmoid',
                   'mil_mode': 'embedding', 'batch_size': 4, 'lr': 0.0269311, 'n_epochs': 5,
                   'use_pseudopatients': False, 'fc_hidden_layers': 2, 'fc_use_bn': True,
                   'backend_cutoff': 1}
 
-    only_philips = {'source_train': 'Philips_iU22_train+val',
+    only_philips = {'source_train': 'Philips_iU22_train',
                          'val': 'Philips_iU22_val'}
 
     only_esaote = {'source_train': 'ESAOTE_6100_train',

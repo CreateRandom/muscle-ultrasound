@@ -5,9 +5,10 @@ import numpy as np
 import torch
 from ignite.metrics import Metric, Loss, MeanAbsoluteError, Accuracy, Precision, Recall
 from ignite.metrics.metric import reinit__is_reduced
+from sklearn.metrics import roc_auc_score
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 
-from utils.binarize_utils import binarize_sigmoid, binarize_softmax
+from utils.binarize_utils import binarize_sigmoid, binarize_softmax, apply_sigmoid
 
 
 class SimpleAccumulator(Metric):
@@ -54,24 +55,6 @@ class Average(SimpleAccumulator):
         return np.mean(self.values)
 
 
-class ErrorIndices(Metric):
-
-    def __init__(self, output_transform: Callable = lambda x: x, device: Optional[Union[str, torch.device]] = None):
-        super().__init__(output_transform, device)
-        self.batch_counter = 0
-
-    def reset(self) -> None:
-        self.batch_counter = 0
-
-    def update(self, output) -> None:
-        y_pred, y = output['y_pred'], output['y']
-        wrong = y_pred != y
-        self.batch_counter = self.batch_counter + len(y)
-
-    def compute(self) -> Any:
-        pass
-
-
 class Minimum(SimpleAccumulator):
     def compute(self) -> Any:
         return np.min(self.values)
@@ -80,18 +63,6 @@ class Minimum(SimpleAccumulator):
 class Maximum(SimpleAccumulator):
     def compute(self) -> Any:
         return np.max(self.values)
-
-
-class HistPlotter(SimpleAccumulator):
-    def __init__(self, visdom_logger, output_transform: Callable = lambda x: x,
-                 device: Optional[Union[str, torch.device]] = None):
-        super().__init__(output_transform, device)
-        self.visdom_logger = visdom_logger
-
-    def compute(self) -> Any:
-        self.visdom_logger.histogram(self.values)
-        return np.mean(self.values)
-
 
 class SimpleAggregate(Metric):
     def __init__(self, base_metric, aggregate, output_transform: Callable = lambda x: x,
@@ -112,6 +83,24 @@ class SimpleAggregate(Metric):
     def compute(self) -> Any:
         self.values.append(self.base_metric.compute())
         return self.aggregate(self.values)
+
+class AUC(Metric):
+    def __init__(self, output_transform: Callable = lambda x: x, device: Optional[Union[str, torch.device]] = None):
+        super().__init__(output_transform, device)
+        self.ys = []
+        self.ypreds = []
+
+    def reset(self) -> None:
+        self.ys = []
+        self.ypreds = []
+
+    def update(self, output) -> None:
+        y_pred, y = output
+        self.ys.extend(list(y.flatten().cpu().numpy()))
+        self.ypreds.extend(list(y_pred.flatten().cpu().numpy()))
+
+    def compute(self) -> Any:
+        return roc_auc_score(self.ys, self.ypreds)
 
 
 class CustomLossWrapper(Loss):
@@ -147,7 +136,11 @@ default_metric_mapping = {
     'binary': [('accuracy', Accuracy, binarize_sigmoid, {}),
                ('p', Precision, binarize_sigmoid, {}),
                ('r', Recall, binarize_sigmoid, {}),
-               ('pos_share', PositiveShare, binarize_sigmoid, {})],
+               ('pos_share', PositiveShare, binarize_sigmoid, {}),
+               ('auc', AUC, apply_sigmoid,{}),
+               ('min_pred', Minimum, lambda output: apply_sigmoid(output)[0],{}),
+               ('mean_pred', Average, lambda output: apply_sigmoid(output)[0], {}),
+               ('max_pred', Maximum, lambda output: apply_sigmoid(output)[0],{})],
 
     'multi': [
         ('accuracy', Accuracy, binarize_softmax, {}),

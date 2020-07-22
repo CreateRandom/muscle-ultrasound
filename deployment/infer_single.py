@@ -10,9 +10,7 @@ from torch import nn
 from captum.attr import Saliency
 from captum.attr import visualization as viz
 
-import matplotlib.pyplot as plt
-
-from deployment.multi_level_inference import load_model_from_checkpoint, load_transform_from_checkpoint
+from deployment.load_multi_input import load_multi_input, load_transform_from_checkpoint
 from utils.binarize_utils import _binarize_sigmoid
 
 
@@ -55,7 +53,7 @@ if __name__ == '__main__':
 
     # load the model
     checkpoint_dir = '../checkpoints/pref_checkpoint_2510.pt'
-    model = load_model_from_checkpoint(checkpoint_dir)
+    model = load_multi_input(checkpoint_dir)
     # the images already have to be resized by the exporter to allow storage in mha, so ignore the resize
     # specified in the output
     transform = load_transform_from_checkpoint(checkpoint_dir, ignore_resize=True)

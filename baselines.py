@@ -9,7 +9,7 @@ import numpy as np
 import torchvision
 from PIL import ImageEnhance
 from scipy import stats
-from scipy.stats import describe
+from scipy.stats import describe, hmean
 from sklearn.dummy import DummyClassifier, DummyRegressor
 from sklearn.linear_model import LinearRegression
 import pandas as pd
@@ -18,7 +18,8 @@ from loading.img_utils import load_image
 from loading.loaders import get_data_for_spec, make_basic_transform
 from loading.loading_utils import make_set_specs
 
-from sklearn.metrics import mean_absolute_error, accuracy_score, classification_report
+from sklearn.metrics import mean_absolute_error, accuracy_score, classification_report, roc_auc_score, roc_curve, auc, \
+    RocCurveDisplay
 
 from utils.utils import compute_normalization_parameters
 
@@ -300,7 +301,6 @@ def run_rule_based_baseline(set_name):
         print(method)
         print(describe(np.delete(all_scores, nan_inds)))
 
-
     p = np.array(patients)
 
     error_frames = {}
@@ -315,6 +315,11 @@ def run_rule_based_baseline(set_name):
         print('Unclear --> no NMD')
         print(classification_report(y_true, y_pred_precision_biased))
 
+        y_pred_rv = preds.replace({'NMD': 1, 'no NMD': 0, 'unknown or uncertain': 0.5}).values
+        mapping = {'NMD': 1, 'no NMD': 0}
+        y_true_rv = [mapping[y] for y in y_true]
+
+        evaluate_preds(y_true_rv,y_pred_rv,method)
         # error analysis
         fps = np.where((np.array(y_true) == 'no NMD') & (np.array(y_pred_recall_biased) == 'NMD'))
         fns = np.where((np.array(y_true) == 'NMD') & (np.array(y_pred_recall_biased) == 'no NMD'))
@@ -335,6 +340,22 @@ def run_rule_based_baseline(set_name):
         error_frames[method] = error_frame
         print(error_frame.groupby(['error_type', 'cramp']).count())
 
+def evaluate_preds(y_true, y_pred, method):
+    fpr, tpr, _ = roc_curve(y_true, y_pred)
+
+    roc_auc = auc(fpr, tpr)
+
+    viz = RocCurveDisplay(
+        fpr=fpr,
+        tpr=tpr,
+        roc_auc=roc_auc,
+        estimator_name=method
+    )
+
+    viz.plot()
+    plt.show()
+
+    print(f'AUC: {roc_auc}')
 
 
 def predict_rule_based(dict_with_exceed):
@@ -506,5 +527,5 @@ def compute_brightness_diff():
 if __name__ == '__main__':
  #   compute_brightness_diff()
  #   analyze_multi_device_patients()
-    run_rule_based_baseline('Philips_iU22_val')
-    run_dummy_baseline('Philips_iU22_val', 'Class')
+    # run_rule_based_baseline('ESAOTE_6100_test')
+    run_dummy_baseline('Philips_iU22_train', 'Class')

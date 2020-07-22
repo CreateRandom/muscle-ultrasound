@@ -6,7 +6,7 @@ from torch import nn, Tensor
 import numpy as np
 from models.mil_pooling import MaxMIL, AttentionMIL, AverageMIL, GatedAttentionMIL
 from models.premade import make_resnet_18, make_alexnet
-from utils.binarize_utils import _binarize_softmax, _binarize_sigmoid
+from utils.binarize_utils import _binarize_softmax, _binarize_sigmoid, _apply_sigmoid
 
 
 class MultiInputAlexNet(nn.Module):
@@ -126,16 +126,17 @@ class MultiInputBaseline(nn.Module):
         super(MultiInputBaseline, self).__init__()
         self.image_level_classifier = image_level_classifier
         # use this only for predictions
-        # TODO make sure this doesn't mess with the gradient
-        # self.image_level_classifier.eval()
 
         self.mode = label_type
         if label_type == 'regression':
             self.out_transform = nn.Identity()
             self.aggregate = torch.mean
-        elif label_type == 'binary':
+        elif label_type == 'binary_mode':
             self.out_transform = _binarize_sigmoid
             self.aggregate = lambda x: torch.mode(x,dim=0)[0]
+        elif label_type == 'binary':
+            self.out_transform = _apply_sigmoid
+            self.aggregate = lambda x: torch.mean(x,dim=0)[0]
         elif label_type == 'multi':
             self.out_transform = _binarize_softmax
             self.aggregate = lambda x: torch.mode(x,dim=0)[0]
@@ -165,6 +166,7 @@ class MultiInputBaseline(nn.Module):
 
 backend_funcs = {'resnet-18': make_resnet_backend, 'default': make_default_backend, 'alexnet': make_alex_backend}
 cnn_constructors = {'resnet-18': make_resnet_18, 'alexnet': make_alexnet}
+
 # for now, we will always assume binary classification, maybe later see how to expand this
 class MultiInputNet(nn.Module):
     def __init__(self, att_specs, backend='alexnet', mil_pooling='attention', mode='embedding',
