@@ -270,14 +270,14 @@ def make_bag_dataset(patients: List[Patient], img_folder, use_one_channel, attri
 
     return ds
 
-def wrap_in_bag_loader(ds, batch_size, pin_memory=False, return_attribute_dict=False):
+def wrap_in_bag_loader(ds, batch_size, pin_memory=False, return_attribute_dict=False, shuffle=True):
     n_cpu = get_n_cpu()
     base_collate_fn = collate_bags_to_batch_multi_atts if return_attribute_dict else collate_bags_to_batch
 
     if isinstance(ds,ConcatDataset):
         base_collate_fn = partial(collate_concat_dataset, base_collate=base_collate_fn)
 
-    loader = DataLoader(ds, batch_size=batch_size, shuffle=True, num_workers=n_cpu, collate_fn=base_collate_fn,
+    loader = DataLoader(ds, batch_size=batch_size, shuffle=shuffle, num_workers=n_cpu, collate_fn=base_collate_fn,
                         pin_memory=pin_memory, drop_last=True)
 
     return loader

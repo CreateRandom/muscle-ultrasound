@@ -19,7 +19,7 @@ from loading.loaders import get_data_for_spec, make_basic_transform
 from loading.loading_utils import make_set_specs
 
 from sklearn.metrics import mean_absolute_error, accuracy_score, classification_report, roc_auc_score, roc_curve, auc, \
-    RocCurveDisplay
+    RocCurveDisplay, precision_score, recall_score
 
 from utils.utils import compute_normalization_parameters
 
@@ -319,7 +319,8 @@ def run_rule_based_baseline(set_name):
         mapping = {'NMD': 1, 'no NMD': 0}
         y_true_rv = [mapping[y] for y in y_true]
 
-        evaluate_preds(y_true_rv,y_pred_rv,method)
+        evaluate_roc(y_true_rv, y_pred_rv, method)
+        find_difficult_cases(y_true_rv,y_pred_rv)
         # error analysis
         fps = np.where((np.array(y_true) == 'no NMD') & (np.array(y_pred_recall_biased) == 'NMD'))
         fns = np.where((np.array(y_true) == 'NMD') & (np.array(y_pred_recall_biased) == 'no NMD'))
@@ -340,10 +341,24 @@ def run_rule_based_baseline(set_name):
         error_frames[method] = error_frame
         print(error_frame.groupby(['error_type', 'cramp']).count())
 
-def evaluate_preds(y_true, y_pred, method):
-    fpr, tpr, _ = roc_curve(y_true, y_pred)
+def evaluate_roc(y_true, y_pred, method):
+    fpr, tpr, thresholds = roc_curve(y_true, y_pred)
 
     roc_auc = auc(fpr, tpr)
+    # best point on the ROC curve --> Youden's J
+    J = tpr - fpr
+    best_ind = np.argmax(J)
+    best_threshold = thresholds[best_ind]
+
+    print(f'Best threshold: < {best_threshold} --> negative')
+
+    # compute precision and recall at that threshold
+    tpr_tester = tpr[best_ind]
+    binarized = (y_pred >= best_threshold).astype(int)
+    recall = recall_score(y_true, binarized)
+    precision = precision_score(y_true, binarized)
+
+    print(f'Recall = {recall}, Precision = {precision}')
 
     viz = RocCurveDisplay(
         fpr=fpr,
@@ -527,5 +542,5 @@ def compute_brightness_diff():
 if __name__ == '__main__':
  #   compute_brightness_diff()
  #   analyze_multi_device_patients()
-    # run_rule_based_baseline('ESAOTE_6100_test')
-    run_dummy_baseline('Philips_iU22_train', 'Class')
+    run_rule_based_baseline('ESAOTE_6100_val')
+    # run_dummy_baseline('Philips_iU22_train', 'Class')

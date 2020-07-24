@@ -10,19 +10,25 @@ def plot_patient_images(x):
     # patient in format n_image * 1 * x * y
     n_image = len(x)
     grid_size = int(np.ceil(np.sqrt(n_image)))
-    fig = plt.figure(figsize=(grid_size * 2, grid_size * 2))
+    fig = plt.figure(figsize=(grid_size * 2, grid_size * 2),dpi=300)
 
     grid = ImageGrid(fig, 111,  # similar to subplot(111)
                      nrows_ncols=(grid_size, grid_size),  # creates 2x2 grid of axes
+                     label_mode='l',
                      axes_pad=0.1,  # pad between axes in inch.
                      )
     for i in range(n_image):
         ax = grid[i]
         im = x[i].squeeze()
         ax.imshow(im, cmap='gray')#, vmin=0, vmax=255)
+        ax.set_xticks([])
+        ax.set_yticks([])
+
+   # plt.axis('off')
+   # plt.grid(b=None)
     return fig
 
-device = 'Philips_iU22'
+device = 'ESAOTE_6100'
 mnt_path = '/mnt/chansey/'
 umc_data_path = os.path.join(mnt_path, 'klaus/data/devices/')
 

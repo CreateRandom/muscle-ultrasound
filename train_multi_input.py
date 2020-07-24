@@ -211,7 +211,7 @@ def train_multi_input(config):
                                          muscles_to_use=muscles_to_use,
                                          dropna_values=dropna_values_set)
 
-            patients = patients[0:40]
+            # patients = patients[0:40]
             print(f'Loaded {len(patients)} elements.')
 
             img_path = set_spec.img_root_path
@@ -305,7 +305,19 @@ def train_multi_input(config):
             base_dict['coral_losses'] = y_pred['coral_losses']
         return base_dict
 
-    metrics = obtain_metrics(attribute_specs=attribute_specs, extract_multiple_atts=True)
+    # allow adding a weight to reweight binary labels --> trade in precision and recall
+    if 'class_pos_weight' in config:
+        # kwargs for the loss function
+        # wrap in list
+        loss_weight = [config['class_pos_weight']]
+        # make kwargs
+        loss_kwargs = {'pos_weight': torch.FloatTensor(loss_weight).to(device=device)}
+        loss_kwargs_mapping = {'Class': loss_kwargs}
+    else:
+        loss_kwargs_mapping = {}
+
+    metrics = obtain_metrics(attribute_specs=attribute_specs, extract_multiple_atts=True,
+                             loss_kwargs_mapping=loss_kwargs_mapping)
 
     # logging attention distributions
     log_attention = mil_pooling == 'attention'
@@ -327,13 +339,14 @@ def train_multi_input(config):
         trainer = create_da_trainer(model, optimizer, attribute_specs,
                                     att_loss_weights=att_loss_weights, lambda_weight=lambda_weight,
                                     layers_to_compute_da_on=layers_to_compute_da_on,
+                                    loss_kwargs_mapping= loss_kwargs_mapping,
                                     device=device, output_transform=custom_output_transform,
                                     deterministic=True)
     else:
 
         train_metrics = metrics
         trainer = create_bag_attention_trainer(model, optimizer, attribute_specs,
-                                               att_loss_weights=att_loss_weights,
+                                               att_loss_weights=att_loss_weights, loss_kwargs_mapping=loss_kwargs_mapping,
                                                device=device, output_transform=custom_output_transform,
                                                deterministic=True)
 
@@ -413,13 +426,16 @@ def train_multi_input(config):
     pbar = ProgressBar()
     pbar.attach(trainer)
 
-    # make checkpoint dir based on contents of config
-    try:
-        exp_id = npt_logger.get_experiment()._id
-        checkpoint_dir = os.path.join('checkpoints', project_name, exp_id)
-        os.makedirs(checkpoint_dir,exist_ok=True)
-    except:
-        checkpoint_dir = 'checkpoints'
+    # fallback to naming based on experiment config
+    if 'checkpoint_dir' not in config:
+        try:
+            exp_id = npt_logger.get_experiment()._id
+            checkpoint_dir = os.path.join('checkpoints', project_name, exp_id)
+            os.makedirs(checkpoint_dir, exist_ok=True)
+        except:
+            checkpoint_dir = 'checkpoints'
+    else:
+        checkpoint_dir = config.get('checkpoint_dir')
 
     checkpointer = ModelCheckpoint(checkpoint_dir, 'pref', create_dir=True, require_empty=False, n_saved=None,
                                    global_step_transform= global_step_from_engine(trainer))
@@ -463,6 +479,6 @@ if __name__ == '__main__':
 
     da = {'source_train': 'ESAOTE_6100_train', 'target_train': 'Philips_iU22_train',
                          'val': ['ESAOTE_6100_val', 'Philips_iU22_val']}
-    config = {**bag_config, **only_philips}
+    config = {**bag_config, **da}
 
     train_multi_input(config)

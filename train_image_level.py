@@ -19,7 +19,6 @@ from ignite.handlers import global_step_from_engine, ModelCheckpoint
 from ignite.contrib.handlers.neptune_logger import NeptuneLogger, OutputHandler, WeightsScalarHandler, \
     GradsScalarHandler
 
-from utils.binarize_utils import binarize_sigmoid, apply_sigmoid
 from utils.trainers import StateDictWrapper
 from utils.utils import pytorch_count_params
 from utils.ignite_metrics import PositiveShare, Variance, Average, loss_mapping, obtain_metrics, AUC, \
@@ -225,9 +224,21 @@ def train_image_level(config):
 
     config['n_params_backend'] = n_params_backend
 
-    criterion = loss_mapping[att_spec_dict[attribute].target_type]
-
     device = torch.device("cuda:0" if use_cuda else "cpu")
+
+    criterion_fn = loss_mapping[att_spec_dict[attribute].target_type]
+
+    # allow adding a weight to reweight binary labels --> trade in precision and recall
+    if 'class_pos_weight' in config:
+        # kwargs for the loss function
+        # wrap in list
+        loss_weight = [config['class_pos_weight']]
+        # make kwargs
+        loss_kwargs = {'pos_weight': torch.FloatTensor(loss_weight).to(device=device)}
+    else:
+        loss_kwargs = {}
+    criterion = criterion_fn(**loss_kwargs)
+
     # needs to be manually enforced to work on the cluster
     model.to(device)
     patient_eval.to(device)
@@ -245,7 +256,8 @@ def train_image_level(config):
                                         device=device, output_transform=custom_output_transform,
                                         deterministic=True)
 
-    metrics = obtain_metrics(attribute_specs, extract_multiple_atts=False)
+    metrics = obtain_metrics(attribute_specs, extract_multiple_atts=False,
+                             loss_kwargs_mapping={'Class': loss_kwargs})
 
     # attach metrics to the trainer
     for set_spec, metric in metrics.items():
@@ -345,12 +357,15 @@ def train_image_level(config):
     pbar.attach(trainer)
 
     # make checkpoint dir based on contents of config
-    try:
-        exp_id = npt_logger.get_experiment()._id
-        checkpoint_dir = os.path.join('checkpoints', project_name, exp_id)
-        os.makedirs(checkpoint_dir, exist_ok=True)
-    except:
-        checkpoint_dir = 'checkpoints'
+    if 'checkpoint_dir' not in config:
+        try:
+            exp_id = npt_logger.get_experiment()._id
+            checkpoint_dir = os.path.join('checkpoints', project_name, exp_id)
+            os.makedirs(checkpoint_dir, exist_ok=True)
+        except:
+            checkpoint_dir = 'checkpoints'
+    else:
+        checkpoint_dir = config.get('checkpoint_dir')
 
     checkpointer = ModelCheckpoint(checkpoint_dir, 'pref', create_dir=True, require_empty=False, n_saved=None,
                                    global_step_transform=global_step_from_engine(trainer))
@@ -387,10 +402,11 @@ def train_image_level(config):
 
 if __name__ == '__main__':
     config = {'prediction_target': 'Class', 'backend_mode': 'finetune',
-              'backend': 'resnet-18', 'batch_size': 32, 'lr': 0.0269311, 'n_epochs': 5}
+              'backend': 'resnet-18', 'batch_size': 32, 'lr': 0.0321255178684432, 'n_epochs': 10,
+              'neptune_project': 'createrandom/MUS-RQ1'}
 
     esoate_train = {'source_train': 'ESAOTE_6100_train',
-                         'val': ['ESAOTE_6100_val']}
+                         'val': ['ESAOTE_6100_val','Philips_iU22_val']}
 
     config = {**config, **esoate_train}
 

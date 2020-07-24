@@ -9,13 +9,19 @@ from utils.coral import coral
 from utils.ignite_metrics import loss_mapping
 
 
-def compute_classification_loss(head_preds, y, att_specs, loss_weights=None):
+def compute_classification_loss(head_preds, y, att_specs, loss_weights=None, loss_kwargs_mapping=None):
     if not loss_weights:
         loss_weights = {}
     loss_dict = {}
     for att_spec in att_specs:
+        if loss_kwargs_mapping and att_spec.name in loss_kwargs_mapping:
+            loss_kwargs = loss_kwargs_mapping[att_spec.name]
+        else:
+            loss_kwargs = {}
+
         name = att_spec.name
         loss_fn = loss_mapping[att_spec.target_type]
+        loss_fn = loss_fn(**loss_kwargs)
         # filter nan values in y
         to_keep = ~torch.isnan(y[name])
         _y = y[name][to_keep]
@@ -52,6 +58,7 @@ def create_bag_attention_trainer(
     optimizer: torch.optim.Optimizer,
     att_specs,
     att_loss_weights = None,
+    loss_kwargs_mapping=None,
     device: Optional[Union[str, torch.device]] = None,
     non_blocking: bool = False,
     prepare_batch: Callable = _prepare_batch,
@@ -108,7 +115,7 @@ def create_bag_attention_trainer(
         x, y = prepare_batch(batch, device=device, non_blocking=non_blocking)
         model_return_dict = model(x)
         head_preds = model_return_dict['head_preds']
-        loss = compute_classification_loss(head_preds, y, att_specs, att_loss_weights)
+        loss = compute_classification_loss(head_preds, y, att_specs, att_loss_weights, loss_kwargs_mapping)
 
         if loss > 0:
             loss.backward()
@@ -213,6 +220,7 @@ def create_da_trainer(
     att_specs,
     lambda_weight,
     layers_to_compute_da_on,
+    loss_kwargs_mapping = None,
     att_loss_weights = None,
     device: Optional[Union[str, torch.device]] = None,
     non_blocking: bool = False,
@@ -273,7 +281,7 @@ def create_da_trainer(
         x_tgt, _ = target
         model_out_src = model(x_src)
         head_preds = model_out_src['head_preds']
-        class_loss = compute_classification_loss(head_preds, y_src, att_specs, att_loss_weights)
+        class_loss = compute_classification_loss(head_preds, y_src, att_specs, att_loss_weights,loss_kwargs_mapping)
 
         # store the predictions
         pred_output['preds'] = model_out_src['head_preds']

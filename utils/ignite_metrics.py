@@ -5,7 +5,7 @@ import numpy as np
 import torch
 from ignite.metrics import Metric, Loss, MeanAbsoluteError, Accuracy, Precision, Recall
 from ignite.metrics.metric import reinit__is_reduced
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import roc_auc_score, roc_curve
 from torch.nn import BCEWithLogitsLoss, CrossEntropyLoss, MSELoss
 
 from utils.binarize_utils import binarize_sigmoid, binarize_softmax, apply_sigmoid
@@ -102,6 +102,15 @@ class AUC(Metric):
     def compute(self) -> Any:
         return roc_auc_score(self.ys, self.ypreds)
 
+class YoudensJ(AUC):
+
+    def compute(self) -> Any:
+        fpr, tpr, thresholds = roc_curve(self.ys, self.ypreds)
+        J = tpr - fpr
+        best_ind = np.argmax(J)
+        best_threshold = thresholds[best_ind]
+        return best_threshold
+
 
 class CustomLossWrapper(Loss):
 
@@ -126,8 +135,8 @@ class CustomLossWrapper(Loss):
         self._num_examples += N
 
 
-loss_mapping = {'binary': BCEWithLogitsLoss(),'multi': CrossEntropyLoss(),
-                'regression': MSELoss()}
+loss_mapping = {'binary': BCEWithLogitsLoss,'multi': CrossEntropyLoss,
+                'regression': MSELoss}
 default_metric_mapping = {
     'regression': [('mae', MeanAbsoluteError, None, {}),
                    ('mean', Average, lambda output: output['y_pred'], {}),
@@ -138,6 +147,7 @@ default_metric_mapping = {
                ('r', Recall, binarize_sigmoid, {}),
                ('pos_share', PositiveShare, binarize_sigmoid, {}),
                ('auc', AUC, apply_sigmoid,{}),
+               ('best_threshold', YoudensJ, apply_sigmoid,{}),
                ('min_pred', Minimum, lambda output: apply_sigmoid(output)[0],{}),
                ('mean_pred', Average, lambda output: apply_sigmoid(output)[0], {}),
                ('max_pred', Maximum, lambda output: apply_sigmoid(output)[0],{})],
@@ -197,7 +207,7 @@ def build_transform(map_fn, transform_fn):
 
 
 def obtain_metrics(attribute_specs, extract_multiple_atts=False, metric_mapping=None,
-                   add_loss=True):
+                   add_loss=True, loss_kwargs_mapping=None):
     if metric_mapping == None:
         metric_mapping = default_metric_mapping
 
@@ -208,11 +218,15 @@ def obtain_metrics(attribute_specs, extract_multiple_atts=False, metric_mapping=
 
     final_metrics = {}
     for att_spec in attribute_specs:
+        if loss_kwargs_mapping and att_spec.name in loss_kwargs_mapping:
+            loss_kwargs = loss_kwargs_mapping[att_spec.name]
+        else:
+            loss_kwargs = {}
         if add_loss:
             # make loss metric
             loss_name = 'loss_' + att_spec.name
             loss_fn = loss_mapping[att_spec.target_type]
-
+            loss_fn = loss_fn(**loss_kwargs)
             if extract_multiple_atts:
                 transform = make_loss_extractor(att_spec.name)
             else:
