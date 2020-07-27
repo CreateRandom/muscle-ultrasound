@@ -8,10 +8,7 @@ from ray.ray_constants import OBJECT_STORE_MINIMUM_MEMORY_BYTES
 from train_multi_input import train_multi_input
 from utils.utils import powerset
 
-attributes_to_include = ['Age', 'Sex', 'BMI']
-loss_weight_ranges = {'Sex' : (0.1, 3), 'Age': (0.0001, 1), 'BMI': (0.0001,1)}
-
-def sample_loss_weight_dict():
+def sample_loss_weight_dict(attributes_to_include, loss_weight_ranges):
     combs = list(powerset(attributes_to_include))
     # remove the empty set
     combs.remove(())
@@ -25,7 +22,7 @@ def sample_loss_weight_dict():
         loss_weight_dict[elem] = weight
     return loss_weight_dict
 
-def run_rq1():
+def sweep_multihead():
     # see here https://github.com/ray-project/ray/issues/7084
     ray.init(webui_host='127.0.0.1', object_store_memory=OBJECT_STORE_MINIMUM_MEMORY_BYTES)
 
@@ -39,7 +36,10 @@ def run_rq1():
     philips_train = {'source_train': 'Philips_iU22_train',
                      'val': ['ESAOTE_6100_val', 'Philips_iU22_val']}
 
-    train_set_specs = [esaote_train]#, philips_train]
+    attributes_to_include = ['Age', 'Sex', 'BMI']
+    loss_weight_ranges = {'Sex': (0.1, 3), 'Age': (0.0001, 1), 'BMI': (0.0001, 1)}
+
+    train_set_specs = [esaote_train, philips_train]
 
     for train_set_spec in train_set_specs:
         base_config = {'prediction_target': attribute, 'backend_mode': 'finetune',
@@ -55,13 +55,14 @@ def run_rq1():
 
         bag_config = {**base_config, **bag_config}
 
+
         # run multi head classification, varying which classes are included
         bag_sweep_config = {
             # lr for bag classifier and pooling
             "lr": sample_from(lambda x: random.uniform(0.001, 0.1)),
             # effective extract_only should be possible by setting a very small lr
             "backend_lr": sample_from(lambda x: random.uniform(0.001, 0.1)),
-            "att_loss_weights": sample_from(lambda x: sample_loss_weight_dict())
+            "att_loss_weights": sample_from(lambda x: sample_loss_weight_dict(attributes_to_include,loss_weight_ranges))
         }
 
         config = {**bag_config, **bag_sweep_config}

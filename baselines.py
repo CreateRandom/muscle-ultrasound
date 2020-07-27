@@ -320,7 +320,6 @@ def run_rule_based_baseline(set_name):
         y_true_rv = [mapping[y] for y in y_true]
 
         evaluate_roc(y_true_rv, y_pred_rv, method)
-        find_difficult_cases(y_true_rv,y_pred_rv)
         # error analysis
         fps = np.where((np.array(y_true) == 'no NMD') & (np.array(y_pred_recall_biased) == 'NMD'))
         fns = np.where((np.array(y_true) == 'NMD') & (np.array(y_pred_recall_biased) == 'no NMD'))
@@ -542,5 +541,5 @@ def compute_brightness_diff():
 if __name__ == '__main__':
  #   compute_brightness_diff()
  #   analyze_multi_device_patients()
-    run_rule_based_baseline('ESAOTE_6100_val')
-    # run_dummy_baseline('Philips_iU22_train', 'Class')
+     run_rule_based_baseline('Philips_iU22_val')
+     run_dummy_baseline('Philips_iU22_val', 'Class')

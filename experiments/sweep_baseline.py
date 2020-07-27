@@ -21,7 +21,7 @@ def sweep_baseline():
 
     train_set_specs = [esaote_train, philips_train]
 
-    base_config = {'prediction_target': 'Class', 'backend': 'resnet-18', 'n_epochs': 10,
+    base_config = {'prediction_target': 'Class', 'backend': 'resnet-18', 'n_epochs': 15,
                    'neptune_project': 'createrandom/MUS-RQ1', 'batch_size': 32}
 
     for train_set_spec in train_set_specs:
@@ -29,7 +29,7 @@ def sweep_baseline():
         total_config = {**base_config, **train_set_spec}
 
         image_sweep_config = {"lr": sample_from(lambda x: random.uniform(0.001, 0.1)),
-                              "mode": sample_from(lambda x: random.choice(['finetune', 'scratch']))}
+                              "backend_mode": sample_from(lambda x: random.choice(['finetune', 'scratch']))}
 
         config = {**total_config, **image_sweep_config}
 
