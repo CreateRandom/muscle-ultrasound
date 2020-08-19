@@ -84,6 +84,7 @@ def train_multi_input(config):
 
     # whether to crop images to ImageNet size (i.e. 224 * 224)
     limit_image_size = config.get('limit_image_size', True)
+    use_mask = config.get('use_mask', False)
     lr = config.get('lr', 0.001)
     # separate lr for the backend can be specified, defaults to normal LR
     backend_lr = config.get('backend_lr', lr)
@@ -235,7 +236,7 @@ def train_multi_input(config):
             ds = make_bag_dataset(patients, img_path, use_one_channel=use_one_channel,
                                      attribute_specs=attribute_specs, transform=transform,
                                      use_pseudopatients=use_pseudopatient_locally,
-                                     return_attribute_dict=True)
+                                     return_attribute_dict=True, use_mask=use_mask)
 
             datasets.append(ds)
 
@@ -426,16 +427,20 @@ def train_multi_input(config):
     pbar = ProgressBar()
     pbar.attach(trainer)
 
+    checkpoint_base_path = os.path.join(mnt_path, 'klaus/muscle-ultrasound/checkpoints')
+
     # fallback to naming based on experiment config
     if 'checkpoint_dir' not in config:
         try:
             exp_id = npt_logger.get_experiment()._id
-            checkpoint_dir = os.path.join('checkpoints', project_name, exp_id)
+            checkpoint_dir = os.path.join(checkpoint_base_path, project_name, exp_id)
             os.makedirs(checkpoint_dir, exist_ok=True)
         except:
-            checkpoint_dir = 'checkpoints'
+            checkpoint_dir = checkpoint_base_path
     else:
         checkpoint_dir = config.get('checkpoint_dir')
+
+    print(f'Using checkpoint: {checkpoint_dir}')
 
     checkpointer = ModelCheckpoint(checkpoint_dir, 'pref', create_dir=True, require_empty=False, n_saved=None,
                                    global_step_transform= global_step_from_engine(trainer))

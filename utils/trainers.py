@@ -149,6 +149,38 @@ def flatten_attention_scores(attention_outputs):
         att_scores_flat = torch.cat(att_scores_flat)
     return att_scores_flat
 
+def create_image_baseline_evaluator(
+    model: torch.nn.Module,
+    metrics: Optional[Dict[str, Metric]] = None,
+    device: Optional[Union[str, torch.device]] = None,
+    non_blocking: bool = False,
+    prepare_batch: Callable = _prepare_batch,
+    output_transform: Callable = lambda x, y, y_pred: (y_pred, y),
+) -> Engine:
+
+    metrics = metrics or {}
+
+    def _inference(engine: Engine, batch: Sequence[torch.Tensor]) -> Union[Any, Tuple[torch.Tensor]]:
+        model.eval()
+        with torch.no_grad():
+            pred_output = {}
+            x, y = prepare_batch(batch, device=device, non_blocking=non_blocking)
+            model_return_dict = model(x)
+            pred_output['preds'] = model_return_dict['preds']
+
+            # if image wise predications are available, flatten and return them
+            if 'image_preds' in model_return_dict:
+                image_preds_flat = flatten_attention_scores(model_return_dict['image_preds'])
+                pred_output['imagewise_preds'] = image_preds_flat
+            return output_transform(x, y, pred_output)
+
+    evaluator = Engine(_inference)
+
+    for name, metric in metrics.items():
+        metric.attach(evaluator, name)
+
+    return evaluator
+
 def create_bag_attention_evaluator(
     model: torch.nn.Module,
     metrics: Optional[Dict[str, Metric]] = None,

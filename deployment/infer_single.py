@@ -10,7 +10,7 @@ from torch import nn
 from captum.attr import Saliency
 from captum.attr import visualization as viz
 
-from deployment.load_multi_input import load_multi_input, load_transform_from_checkpoint
+from deployment.load_multi_input import load_multi_input, load_transform_from_checkpoint, load_checkpoint
 from utils.binarize_utils import _binarize_sigmoid
 
 
@@ -43,7 +43,7 @@ class ModelReadoutWrapper(nn.Module):
 if __name__ == '__main__':
     extensions = ('.mha', '.mhd')
     base_path = '../input'
-    file_names = [fn for fn in os.listdir(base_path) if str.endswith(fn,extensions)]
+    file_names = [fn for fn in os.listdir(base_path) if str.endswith(fn, extensions)]
 
     if not file_names:
         print("No files were found in the input", file=sys.stderr)
@@ -52,11 +52,24 @@ if __name__ == '__main__':
     os.makedirs('../output/images',exist_ok=True)
 
     # load the model
-    checkpoint_dir = '../checkpoints/pref_checkpoint_2510.pt'
-    model = load_multi_input(checkpoint_dir)
+
+    base_checkpoint_path = '/mnt/chansey/klaus/muscle-ultrasound/checkpoints/'
+    project_name = 'createrandom/mus-experiments'
+    experiment = 'MUS2-16'
+    file_name = 'pref_checkpoint'
+    epoch = 9
+
+    file_name = file_name + '_' + str(epoch) + '.pt'
+
+    # build path to the checkpoint
+    checkpoint_dir = os.path.join(base_checkpoint_path, project_name, experiment, file_name)
+
+    checkpoint = load_checkpoint(checkpoint_dir)
+    config = checkpoint['config']
+    model = load_multi_input(checkpoint)
     # the images already have to be resized by the exporter to allow storage in mha, so ignore the resize
     # specified in the output
-    transform = load_transform_from_checkpoint(checkpoint_dir, ignore_resize=True)
+    transform = load_transform_from_checkpoint(checkpoint, ignore_resize=True)
     model.eval()
 
     json_results = []
@@ -65,14 +78,18 @@ if __name__ == '__main__':
         result = {}
         result['entity'] = fn
         result['error_messages'] = []
-        impath = os.path.join(base_path,fn)
+        impath = os.path.join(base_path, fn)
         image = itk.imread(impath)
-        array = itk.array_from_image(image)
+        img_list = itk.array_from_image(image)
         # make sure that the dimensionality is correct, TODO parametrize
-        img_list = [expand_to_3d(elem) for elem in array]
+        if config['in_channels'] == 3:
+            img_list = [expand_to_3d(elem) for elem in img_list]
+            mode = 'RGB'
+        else:
+            mode = 'L'
 
         # load each image to PIL
-        imgs = [Image.fromarray(img, mode='RGB') for img in img_list]
+        imgs = [Image.fromarray(img, mode=mode) for img in img_list]
         # apply the stored transform to the input
         imgs = [transform(img) for img in imgs]
 
@@ -103,7 +120,7 @@ if __name__ == '__main__':
                                     alpha_overlay=0.5, sign="absolute_value", show_colorbar=False, title=title)
             out_path = os.path.join('../output/images', (str(i) + '.png'))
 
-            fig.savefig(out_path)
+        #    fig.savefig(out_path)
 
         # stack up the activation maps
         grad_output = np.stack(norm_grads)

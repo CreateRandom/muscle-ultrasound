@@ -19,7 +19,7 @@ from ignite.handlers import global_step_from_engine, ModelCheckpoint
 from ignite.contrib.handlers.neptune_logger import NeptuneLogger, OutputHandler, WeightsScalarHandler, \
     GradsScalarHandler
 
-from utils.trainers import StateDictWrapper
+from utils.trainers import StateDictWrapper, create_image_baseline_evaluator
 from utils.utils import pytorch_count_params
 from utils.ignite_metrics import PositiveShare, Variance, Average, loss_mapping, obtain_metrics, AUC, \
     default_metric_mapping
@@ -76,6 +76,7 @@ def train_image_level(config):
 
     # whether to crop images to ImageNet size (i.e. 224 * 224)
     limit_image_size = config.get('limit_image_size', True)
+    use_mask = config.get('use_mask',False)
     lr = config.get('lr', 0.001)
 
     n_epochs = config.get('n_epochs', 20)
@@ -190,6 +191,7 @@ def train_image_level(config):
             
             image_loader = make_image_loader(images, img_path, use_one_channel, normalizer_name,
                                              attribute_specs, batch_size, set_spec.device, limit_image_size=limit_image_size,
+                                             use_mask=use_mask,
                                              pin_memory=use_cuda, is_multi=is_multi, return_multiple_atts= False)
             image_loaders.append(image_loader)
 
@@ -329,9 +331,19 @@ def train_image_level(config):
 
     val_loaders_bag = set_loaders['bag']['val']
     val_evaluators_bag = []
+
+    def custom_output_transform_image_baseline(x, y, y_pred):
+        base_dict = {
+            "y": y,
+            "y_pred": y_pred['preds'],
+        }
+        if 'atts' in y_pred:
+            base_dict['imagewise_preds'] = y_pred['imagewise_preds']
+        return base_dict
+
     for set_spec, loader in zip(val_names, val_loaders_bag):
-        val_evaluator = create_supervised_evaluator(patient_eval, metrics=bag_level_metrics, device=device,
-                                                    output_transform=custom_output_transform_eval)
+        val_evaluator = create_image_baseline_evaluator(patient_eval, metrics=bag_level_metrics, device=device,
+                                                    output_transform=custom_output_transform_image_baseline)
 
         # val_evaluator = create_image_to_bag_evaluator(model, metrics=metrics_to_add, device=device,
         #                                              output_transform=custom_output_transform_eval)
@@ -356,14 +368,16 @@ def train_image_level(config):
     pbar = ProgressBar()
     pbar.attach(trainer)
 
+    checkpoint_base_path = os.path.join(mnt_path, 'klaus/muscle-ultrasound/checkpoints')
+
     # make checkpoint dir based on contents of config
     if 'checkpoint_dir' not in config:
         try:
             exp_id = npt_logger.get_experiment()._id
-            checkpoint_dir = os.path.join('checkpoints', project_name, exp_id)
+            checkpoint_dir = os.path.join(checkpoint_base_path, project_name, exp_id)
             os.makedirs(checkpoint_dir, exist_ok=True)
         except:
-            checkpoint_dir = 'checkpoints'
+            checkpoint_dir = checkpoint_base_path
     else:
         checkpoint_dir = config.get('checkpoint_dir')
 

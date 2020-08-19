@@ -8,12 +8,12 @@ from loading.loaders import get_data_for_spec, make_bag_dataset, make_basic_tran
 from loading.datasets import make_att_specs, PatientBagDataset
 from loading.datasets import  problem_legal_values
 if __name__ == '__main__':
-    set_name = 'Philips_iU22_val'
+    set_name = 'ESAOTE_6100_val'
     set_spec_dict = get_default_set_spec_dict()
     set_spec = set_spec_dict[set_name]
     patients = get_data_for_spec(set_spec, loader_type='bag', attribute_to_filter='Class',
                                  legal_attribute_values=problem_legal_values['Class'],
-                                 muscles_to_use=None, boolean_subset_attribute='Class_sample')
+                                 muscles_to_use=None)
 
     att_spec_dict = make_att_specs()
 
@@ -34,5 +34,5 @@ if __name__ == '__main__':
 
         im = itk.image_from_array(x)
         os.makedirs('../input/', exist_ok=True)
-        file_name = f'../input/patient_{i}.mha'
+        file_name = f'../input/patient_esaote_{i}.mha'
         itk.imwrite(im, file_name)

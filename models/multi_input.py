@@ -155,14 +155,17 @@ class MultiInputBaseline(nn.Module):
         # split by patient
         pwise_preds = torch.split(preds, n_images_per_bag)
         final_preds = []
+        pwise_image_preds = []
         for preds in pwise_preds:
             # perform the output transform to get labels
             transformed_preds = self.out_transform(preds)
+            pwise_image_preds.append(transformed_preds.clone().detach())
             final_pred = self.aggregate(transformed_preds)
             final_preds.append(final_pred)
 
         final_preds = torch.stack(final_preds)
-        return final_preds
+        att_dict = {'preds': final_preds, 'image_preds': pwise_image_preds}
+        return att_dict
 
 backend_funcs = {'resnet-18': make_resnet_backend, 'default': make_default_backend, 'alexnet': make_alex_backend}
 cnn_constructors = {'resnet-18': make_resnet_18, 'alexnet': make_alexnet}

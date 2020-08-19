@@ -211,14 +211,21 @@ def umc_to_patient_list(patient_path, record_path, image_path, attribute_to_filt
 def collate_bags_to_batch_multi_atts(batch):
     x = [batch[e][0] for e in range(len(batch))]
     att_tensors = {}
+    non_tensor_atts = {}
     for e in range(len(batch)):
         att_dict = batch[e][1]
         for k, v in att_dict.items():
-            new_v = torch.tensor(v)
-            if k not in att_tensors:
-                att_tensors[k] = []
-            att_tensors[k].append(new_v)
+            # some attributes might be lists etc (if passed through), store those separately
+            try:
+                new_v = torch.tensor(v)
+                if k not in att_tensors:
+                    att_tensors[k] = []
+                att_tensors[k].append(new_v)
+            except:
+                non_tensor_atts[k] = v
     att_tensors = {k: torch.stack(v).unsqueeze(dim=1) for k, v in att_tensors.items()}
+
+    att_tensors = {**att_tensors, **non_tensor_atts}
 
     n_images_per_bag = torch.tensor([batch[x][0].shape[0] for x in range(len(batch))])
     # concat into n_images * channels * height * width, i.e. squeeze out images per patient
@@ -260,11 +267,12 @@ def get_n_cpu():
 
 
 def make_bag_dataset(patients: List[Patient], img_folder, use_one_channel, attribute_specs,
-                    transform,return_attribute_dict= False, use_pseudopatients=False):
+                    transform,return_attribute_dict= False, use_pseudopatients=False, use_mask=False):
     # TODO allow comparison of different methods for using pseudopatients
     ds = PatientBagDataset(patient_list=patients, root_dir=img_folder,
                            attribute_specs= attribute_specs, transform=transform, use_pseudopatients=use_pseudopatients,
-                           muscles_to_use=None, use_one_channel=use_one_channel, return_attribute_dict=return_attribute_dict)
+                           muscles_to_use=None, use_one_channel=use_one_channel, return_attribute_dict=return_attribute_dict,
+                           use_mask=use_mask)
 
     print(f'Total number of images in dataset: {ds.get_total_number_of_images()}')
 
@@ -322,7 +330,7 @@ def make_image_exporter(image_frame: pd.DataFrame, img_folder, use_one_channel, 
     return loader
 
 def make_image_loader(image_frame: pd.DataFrame, img_folder, use_one_channel, normalizer_name, attribute_specs, batch_size,
-                      device, limit_image_size, pin_memory=False, is_multi=False, return_multiple_atts=False):
+                      device, limit_image_size, use_mask=False, pin_memory=False, is_multi=False, return_multiple_atts=False):
 
     transform = make_basic_transform(device, normalizer_name=normalizer_name, limit_image_size=limit_image_size)
 
@@ -334,7 +342,7 @@ def make_image_loader(image_frame: pd.DataFrame, img_folder, use_one_channel, no
 
     ds = SingleImageDataset(image_frame=image_frame, root_dir=img_folder, attribute_specs=attribute_specs,
                             return_attribute_dict= return_multiple_atts, transform=transform,
-                            use_one_channel=use_one_channel)
+                            use_one_channel=use_one_channel, use_mask=use_mask)
 
     n_cpu = get_n_cpu()
     # use default

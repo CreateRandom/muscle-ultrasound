@@ -220,11 +220,16 @@ class PatientBagDataset(Dataset):
                 attribute_label = patient.attributes[attribute_spec.name]
             elif attribute_spec.source == 'record':
                 attribute_label = sample.meta_info[attribute_spec.name]
+            elif attribute_spec.source == 'image':
+                attribute_label = image_frame[attribute_spec.name]
             else:
                 continue
 
-            if attribute_spec.target_type != 'regression' and not pandas.isnull(attribute_label):
-                attribute_label = attribute_spec.encoder.get_classification_label(attribute_label)
+            if attribute_spec.target_type == 'passthrough':
+                pass
+            else:
+                if attribute_spec.target_type != 'regression' and not pandas.isnull(attribute_label):
+                    attribute_label = attribute_spec.encoder.get_classification_label(attribute_label)
             attribute_dict[attribute_spec.name] = attribute_label
 
         # attribute_label = patient.attributes[self.attribute]
@@ -308,6 +313,14 @@ class PatientRecord(object):
             meta_info = {}
         self.meta_info = meta_info
 
+    def get_EI_frame(self):
+        muscles = self.meta_info['Muscles_list']
+        sides = self.meta_info['Sides']
+        ei = self.meta_info['EIs']
+        eiz = self.meta_info['EIZ']
+
+        return pandas.DataFrame({'Muscle': muscles, 'Side': sides, 'EI': ei, 'EIZ': eiz})
+
 def make_pseudorecords(record, muscles=None, method='each_once', n_limit=100):
     frame_to_process = record.image_frame.copy()
     if muscles:
@@ -372,10 +385,10 @@ class AttributeSpec:
 
 
 problem_kind = {'Sex': 'binary', 'Age': 'regression', 'BMI': 'regression',
-            'Class': 'binary'} # 'Muscle': 'multi',
+            'Class': 'binary', 'Muscle': 'passthrough', 'Side': 'passthrough'} #
 
 problem_source = {'Sex': 'patient', 'Age': 'record', 'BMI': 'record',
-            'Class': 'patient'} # 'Muscle': 'image'
+            'Class': 'patient', 'Muscle': 'image', 'Side' : 'image'} #
 
 problem_legal_values = {'Class': ['no NMD', 'NMD'], 'Sex': ['F', 'M']}
 
