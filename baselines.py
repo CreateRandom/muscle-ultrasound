@@ -137,14 +137,28 @@ def get_mnt_path():
     current_host = socket.gethostname()
     if current_host == 'pop-os':
         mnt_path = '/mnt/chansey/'
+        if not os.path.ismount(mnt_path):
+            return None
     else:
         mnt_path = '/mnt/netcache/diag/'
     return mnt_path
 
-def get_default_set_spec_dict():
-    mnt_path = get_mnt_path()
-    print(f'Using mount_path: {mnt_path}')
+def get_local_set_spec_dict():
+    umc_img_root = '/media/klux/Elements/total_patients'
+    umc_data_path = '/home/klux/Thesis_2/klaus/data/devices/'
+    jhu_data_path = '/home/klux/Thesis_2/klaus/myositis/'
+    jhu_img_root = '/home/klux/Thesis_2/klaus/myositis/processed_imgs'
+    set_spec_dict = make_set_specs(umc_data_path, umc_img_root, jhu_data_path, jhu_img_root)
+    return set_spec_dict
 
+def get_default_set_spec_dict(mnt_path=None, local=False):
+    if not mnt_path:
+        mnt_path = get_mnt_path()
+        print(f'Retrieved mount_path: {mnt_path}')
+    # local mode if so desired or nothing could be mounted
+    if local or not mnt_path:
+        print('Falling back to local path!')
+        return get_local_set_spec_dict()
     umc_data_path = os.path.join(mnt_path, 'klaus/data/devices/')
     umc_img_root = os.path.join(mnt_path, 'klaus/total_patients/')
     jhu_data_path = os.path.join(mnt_path, 'klaus/myositis/')
@@ -171,8 +185,14 @@ def run_dummy_baseline(set_name, attribute):
     else:
         d = DummyClassifier(strategy='most_frequent')
         scorer = classification_report
+
     d.fit([0] * len(y_true), y_true)
     train_preds = d.predict([0] * len(y_true))
+    if kind != 'regression':
+        mapping = {'NMD': 1, 'no NMD': 0}
+        y_true_rv = [mapping[y] for y in y_true]
+        train_preds_rv = [mapping[y] for y in train_preds]
+        print(roc_auc_score(y_true_rv, train_preds_rv))
 
     print(scorer(y_true, train_preds))
 
@@ -187,8 +207,9 @@ def compute_EIZ_from_scratch(record, root_path, z_score_encoder):
         np_array = np.asarray(pil_image)
         ei = np.mean(np_array[np_array > 0])
         return ei
-
-    record.image_frame['EI_manual'] = record.image_frame['ImagePath'].apply(compute_EI_manually).to_list()
+    # TODO come up with a more systematic fix for this issue
+    record.image_frame['filename_only'] = record.image_frame['ImagePath'].apply(lambda x: x.split('/')[1])
+    record.image_frame['EI_manual'] = record.image_frame['filename_only'].apply(compute_EI_manually).to_list()
 
     manual_EI = record.image_frame.groupby(['Muscle', 'Side']).mean()['EI_manual']
     manual_EI = round(manual_EI).astype(int)
@@ -222,17 +243,135 @@ def adjust_EI_with_regression(record, lr_model):
     mapped_EI = lr_model.predict(np.array(record.meta_info['EIs']).reshape(-1, 1)).tolist()
     return mapped_EI
 
+def get_feature_rep_for_rule_based(EIZ, record, additional_features=None):
+    # the default representation needs the age of the patient
+    if additional_features is None:
+        additional_features = ['Age']
+    feature_rep = compute_exceed_scores(EIZ)
+    for additional_feature in additional_features:
+        feature_rep[additional_feature] = record.meta_info[additional_feature]
+    return feature_rep
+
 def obtain_scores_and_preds(EIZ, record, name):
 
-    new_exceed_scores = compute_exceed_scores(EIZ)
-    new_exceed_scores['Age'] = record.meta_info['Age']
+    feature_rep = get_feature_rep_for_rule_based(EIZ, record)
 
-    new_pred = predict_rule_based(new_exceed_scores)
-    new_exceed_scores['pred'] = new_pred
-    new_exceed_scores.pop('Age')
-    new_exceed_scores['method'] = name
-    new_exceed_scores['pid'] = record.meta_info['pid']
-    return new_exceed_scores
+    new_pred = predict_rule_based(feature_rep)
+    feature_rep['pred'] = new_pred
+    feature_rep.pop('Age')
+    feature_rep['method'] = name
+    feature_rep['pid'] = record.meta_info['pid']
+    return feature_rep
+
+def process_feature_rep(feature_rep):
+    new_rep = {}
+    # remove the number, as it could leak info about the patient type
+    # via the fact that different diagnostic protocols have different
+    # numbers of muscles
+    n_scores = feature_rep.pop('NumberZscores')
+    for name, value in feature_rep.items():
+        if name.startswith('Z_exceed'):
+            new_rep[name] = value / n_scores
+        else:
+            new_rep[name] = value
+    return new_rep
+
+def obtain_feature_rep_ml_experiment(set_name,zscore_method=None):
+    # use the original scores as default
+    if not zscore_method:
+        zscore_method = partial(get_original_scores)
+    set_spec_dict = get_default_set_spec_dict()
+    set_spec = set_spec_dict[set_name]
+    patients = get_data_for_spec(set_spec, loader_type='bag', attribute_to_filter='Class',
+                                 legal_attribute_values=problem_legal_values['Class'],
+                                 muscles_to_use=None)
+    feature_reps = []
+    additional_features = ['Age']
+    for patient in patients:
+        patient.try_closest_fallback_to_latest()
+        record = patient.get_selected_record()
+        # TODO allow swapping
+        z_scores = zscore_method(record)
+        feature_rep = get_feature_rep_for_rule_based(z_scores, record, additional_features)
+        # postprocess
+        feature_rep = process_feature_rep(feature_rep)
+        feature_rep['Class'] = record.meta_info['Class']
+        feature_reps.append(feature_rep)
+    feature_frame = pd.DataFrame(feature_reps)
+    return feature_frame
+
+def train_trad_ml_baseline(train_set_name, val_set_name):
+    train_set = obtain_feature_rep_ml_experiment(train_set_name)
+    val_set = obtain_feature_rep_ml_experiment(val_set_name)
+    train_set['Class'] = train_set['Class'].replace({'no NMD': 0, 'NMD': 1})
+    val_set['Class'] = val_set['Class'].replace({'no NMD': 0, 'NMD': 1})
+    from pycaret.classification import setup, compare_models, set_config, predict_model, save_model, \
+        create_model, tune_model, interpret_model
+    features = set(train_set.columns)
+    features.remove('Class')
+    # set the experiment up
+    exp = setup(train_set, target='Class', html = False, session_id = 123, train_size=0.7)
+    # sidestep the fact that the the lib makes another validation set
+    # manually get the pipeline
+    pipeline = exp[7]
+    X_train = train_set.drop(columns='Class')
+    # transform and set as the training set
+    X_train = pipeline.transform(X_train)
+    set_config('X_train', X_train)
+    set_config('y_train', train_set['Class'])
+    X_test = val_set.drop(columns='Class')
+    # transform and set as the validation set
+    X_test = pipeline.transform(X_test)
+    set_config('X_test', X_test)
+    set_config('y_test', val_set['Class'])
+
+    best_model = compare_models(sort = 'AUC',n_select=1)
+    interpret_model(best_model)
+  #  cb = create_model('catboost')
+  #  best_model = tune_model(cb, optimize = 'AUC')
+    save_model(best_model, train_set_name + '_caret_model')
+    # get results on val set as dataframe
+    results = predict_model(best_model,verbose=False)
+    print(classification_report(results['Class'], results['Label']))
+    evaluate_roc(results['Class'], results['Score'], method='tester')
+    print(best_model)
+    # print(results)
+
+def evaluate_ml_baseline(pkl_path, val_set_name):
+    from pycaret.classification import load_model, predict_model, setup
+    pipeline, model = load_model(pkl_path)
+    z_score_encoder = MuscleZScoreEncoder('data/MUS_EI_models.json')
+
+    z_score_method = partial(get_recomputed_z_scores,z_score_encoder=z_score_encoder)
+    val_set = obtain_feature_rep_ml_experiment(val_set_name, z_score_method)
+    val_set['Class'] = val_set['Class'].replace({'no NMD': 0, 'NMD': 1})
+    X_test = val_set.drop(columns='Class')
+    transformed = pipeline.transform(X_test)
+    preds = model.predict(transformed)
+    proba = model.predict_proba(transformed)[:, 1]
+    print(classification_report(val_set['Class'], preds))
+    evaluate_roc(val_set['Class'],proba, method='tester')
+
+def get_original_scores(record):
+    return np.array(record.meta_info['EIZ'])
+
+def get_recomputed_z_scores(record, z_score_encoder):
+    return obtain_zscores(np.array(record.meta_info['EIs']), record, z_score_encoder)
+
+def get_regression_adjusted_z_scores(record,z_score_encoder, regression_model):
+    EI_regression = adjust_EI_with_regression(record, regression_model)
+    EIZ_regression = obtain_zscores(EI_regression, record, z_score_encoder)
+    return EIZ_regression
+
+def get_brightness_adjusted_z_scores(record, z_score_encoder, factor):
+    EI_adjustment = adjust_EI_with_factor(record, factor)
+    EIZ_adjustment = obtain_zscores(EI_adjustment, record, z_score_encoder)
+    return EIZ_adjustment
+
+def get_reextracted_z_scores(record,z_score_encoder,image_path):
+    # image level mapping
+    EIZ_image = compute_EIZ_from_scratch(record, image_path, z_score_encoder=z_score_encoder)
+    return EIZ_image
 
 
 def run_rule_based_baseline(set_name):
@@ -255,27 +394,29 @@ def run_rule_based_baseline(set_name):
         patient.try_closest_fallback_to_latest()
         record = patient.get_selected_record()
         # predictions based on the original z-scores
-        all_preds.append(obtain_scores_and_preds(np.array(record.meta_info['EIZ']), record, 'original'))
-        all_zscores.append({'method': 'original' ,'data': np.array(record.meta_info['EIZ'])})
+        original_scores = get_original_scores(record)
+        all_preds.append(obtain_scores_and_preds(original_scores, record, 'original'))
+        all_zscores.append({'method': 'original' ,'data': original_scores})
 
         # prediction based on the z-score encoder for ESOATE
-        EIZ_from_EI = obtain_zscores(np.array(record.meta_info['EIs']), record, z_score_encoder)
+        EIZ_from_EI = get_recomputed_z_scores(record,z_score_encoder)
         all_zscores.append({'method': 'unadjusted_ei_esoate_eiz', 'data' : EIZ_from_EI})
         all_preds.append(obtain_scores_and_preds(EIZ_from_EI, record,'unadjusted_ei_esoate_eiz'))
 
-        # prediction base
-        EI_regression = adjust_EI_with_regression(record,lr_model)
-        EIZ_regression = obtain_zscores(EI_regression, record, z_score_encoder)
+        # based on regression
+        EIZ_regression = get_regression_adjusted_z_scores(record,z_score_encoder,lr_model)
         all_zscores.append({'method': 'regression_ei_esoate_eiz', 'data': EIZ_regression})
         all_preds.append(obtain_scores_and_preds(EIZ_regression, record, 'regression_ei_esoate_eiz'))
 
-        EI_adjustment = adjust_EI_with_factor(record, 1.4364508393285371)
-        EIZ_adjustment = obtain_zscores(EI_adjustment, record, z_score_encoder)
+        # based on brightness adjustment
+        EIZ_adjustment = get_brightness_adjusted_z_scores(record, z_score_encoder, 1.4364508393285371)
         all_zscores.append({'method': 'adjusted_ei_esoate_eiz', 'data': EIZ_adjustment})
         all_preds.append(obtain_scores_and_preds(EIZ_adjustment,record, 'adjusted_ei_esoate_eiz'))
 
-      #  EIZ_image = compute_EIZ_from_scratch(record, set_spec.img_root_path, z_score_encoder=z_score_encoder)
-      #  pred_dict_image = obtain_scores_and_preds(EIZ_image,record)
+        # image level mapping
+   #     mapped_path = os.path.join(get_mnt_path(),'klaus/pytorch-CycleGAN-and-pix2pix/results/1000samples_basic/fakeB')
+     #   EIZ_image = get_reextracted_z_scores(record, z_score_encoder=z_score_encoder,image_path=mapped_path)
+   #     all_preds.append(obtain_scores_and_preds(EIZ_image,record, 'coral_ei_esoate_eiz'))
 
 
         #  EIZ = np.array(record.meta_info['EIZ'])
@@ -541,5 +682,7 @@ def compute_brightness_diff():
 if __name__ == '__main__':
  #   compute_brightness_diff()
  #   analyze_multi_device_patients()
-     run_rule_based_baseline('Philips_iU22_val')
-     run_dummy_baseline('Philips_iU22_val', 'Class')
+     train_trad_ml_baseline('ESAOTE_6100_train', 'ESAOTE_6100_val')
+     evaluate_ml_baseline('/home/klux/PycharmProjects/muscle-ultrasound/ESAOTE_6100_train_caret_model', 'Philips_iU22_val')
+ #    run_rule_based_baseline('ESAOTE_6100_val')
+ #    run_dummy_baseline('ESAOTE_6100_val', 'Class')
