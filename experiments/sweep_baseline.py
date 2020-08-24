@@ -5,24 +5,17 @@ from ray import tune
 from ray.tune import sample_from
 from ray.ray_constants import OBJECT_STORE_MINIMUM_MEMORY_BYTES
 
+from experiments.experiment_defaults import esaote_train, philips_train
 from train_image_level import train_image_level
 
-def sweep_baseline():
+def sweep_baseline(num_samples):
     # see here https://github.com/ray-project/ray/issues/7084
     ray.init(webui_host='127.0.0.1', object_store_memory=OBJECT_STORE_MINIMUM_MEMORY_BYTES)
-
-    num_samples = 20
-
-    esaote_train = {'source_train': 'ESAOTE_6100_train',
-                    'val': ['ESAOTE_6100_val', 'Philips_iU22_val']}
-
-    philips_train = {'source_train': 'Philips_iU22_train',
-                     'val': ['ESAOTE_6100_val', 'Philips_iU22_val']}
 
     train_set_specs = [esaote_train, philips_train]
 
     base_config = {'prediction_target': 'Class', 'backend': 'resnet-18', 'n_epochs': 15,
-                   'neptune_project': 'createrandom/MUS-RQ1', 'batch_size': 32}
+                   'neptune_project': 'createrandom/mus-imageagg', 'batch_size': 32}
 
     for train_set_spec in train_set_specs:
 
@@ -37,3 +30,5 @@ def sweep_baseline():
                  config=config,
                  num_samples=num_samples,
                  resources_per_trial={"gpu": 1, "cpu": 8})
+
+    ray.shutdown()

@@ -1,3 +1,4 @@
+from baselines import get_default_set_spec_dict
 from training_utils import fix_seed
 from loading.datasets import problem_kind, make_att_specs
 from loading.loaders import make_bag_loader, \
@@ -80,6 +81,7 @@ def train_image_level(config):
     lr = config.get('lr', 0.001)
 
     n_epochs = config.get('n_epochs', 20)
+    tiny_subset = config.get('use_subset',False)
 
     in_channels = 1 if use_one_channel else 3
     config['in_channels'] = in_channels
@@ -109,14 +111,9 @@ def train_image_level(config):
     project_name = config.get('neptune_project', 'createrandom/muscle-ultrasound')
     if 'neptune_project' in config:
         config.pop('neptune_project')
-    # paths to the different datasets
-    umc_data_path = os.path.join(mnt_path, 'klaus/data/devices/')
-    umc_img_root = os.path.join(mnt_path, 'klaus/total_patients/')
-    jhu_data_path = os.path.join(mnt_path, 'klaus/myositis/')
-    jhu_img_root = os.path.join(mnt_path, 'klaus/myositis/processed_imgs')
 
     # yields a mapping from names to set_specs
-    set_spec_dict = make_set_specs(umc_data_path, umc_img_root, jhu_data_path, jhu_img_root)
+    set_spec_dict = get_default_set_spec_dict(mnt_path)
     # this is always needed
     source_train = config.get('source_train')
     target_train = config.get('target_train', None)
@@ -169,9 +166,9 @@ def train_image_level(config):
                                          legal_attribute_values=train_classes,
                                          muscles_to_use=muscles_to_use,
                                          dropna_values=True)
-
-          #  patients = patients[0:10]
-            print(f'Loaded {len(patients)} elements.')
+            if tiny_subset:
+                patients = patients[0:10]
+            print(f'Loaded {len(patients)} patients.')
 
             img_path = set_spec.img_root_path
 
@@ -187,8 +184,10 @@ def train_image_level(config):
                                        legal_attribute_values=train_classes,
                                        muscles_to_use=muscles_to_use,
                                        dropna_values=True)
-        #    images = images.sample(n=250)
-            
+            if tiny_subset:
+                images = images.sample(n=250)
+            print(f'Loaded {len(images)} images.')
+
             image_loader = make_image_loader(images, img_path, use_one_channel, normalizer_name,
                                              attribute_specs, batch_size, set_spec.device, limit_image_size=limit_image_size,
                                              use_mask=use_mask,

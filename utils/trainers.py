@@ -8,6 +8,8 @@ from ignite.metrics import Metric
 from utils.coral import coral
 from utils.ignite_metrics import loss_mapping
 
+from utils.utils import geometric_mean
+
 
 def compute_classification_loss(head_preds, y, att_specs, loss_weights=None, loss_kwargs_mapping=None):
     if not loss_weights:
@@ -30,10 +32,16 @@ def compute_classification_loss(head_preds, y, att_specs, loss_weights=None, los
         if _y.nelement() > 0:
             loss = loss_fn(_y_pred, _y)
             loss_dict[name] = loss
+    # side-step the computation if there is only one elem
+    if len(loss_dict) == 1:
+        loss = list(loss_dict.values())[0]
+    else:
+        # apply weights
+        weighted_losses = dict([(k, loss_weights[k] * v) if k in loss_weights else (k, v) for k, v in loss_dict.items()])
+        # use the geometric mean of the losses
+        loss_values = torch.stack(tuple(weighted_losses.values()))
+        loss = geometric_mean(loss_values,dim=0)
 
-    weighted_losses = dict([(k, loss_weights[k] * v) if k in loss_weights else (k, v) for k, v in loss_dict.items()])
-
-    loss = sum(weighted_losses.values())
 
     return loss
 

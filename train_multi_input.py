@@ -1,5 +1,6 @@
 import warnings
 
+from baselines import get_default_set_spec_dict
 from loading.datasets import problem_kind, make_att_specs, ConcatDataset
 from loading.loaders import make_bag_loader, get_data_for_spec, get_classes, make_bag_dataset, wrap_in_bag_loader, \
     make_basic_transform
@@ -90,6 +91,7 @@ def train_multi_input(config):
     backend_lr = config.get('backend_lr', lr)
 
     n_epochs = config.get('n_epochs', 20)
+    tiny_subset = config.get('use_subset', False)
 
     in_channels = 1 if use_one_channel else 3
     config['in_channels'] = in_channels
@@ -138,11 +140,6 @@ def train_multi_input(config):
     project_name = config.get('neptune_project','createrandom/muscle-ultrasound')
     if 'neptune_project' in config:
         config.pop('neptune_project')
-    # paths to the different datasets
-    umc_data_path = os.path.join(mnt_path, 'klaus/data/devices/')
-    umc_img_root = os.path.join(mnt_path, 'klaus/total_patients/')
-    jhu_data_path = os.path.join(mnt_path, 'klaus/myositis/')
-    jhu_img_root = os.path.join(mnt_path, 'klaus/myositis/processed_imgs')
 
     # get all attribute specs for the specified problem
     attribute_specs = []
@@ -172,7 +169,19 @@ def train_multi_input(config):
                          'val': val}
 
     # yields a mapping from names to set_specs
-    set_spec_dict = make_set_specs(umc_data_path, umc_img_root, jhu_data_path, jhu_img_root)
+    set_spec_dict = get_default_set_spec_dict(mnt_path)
+
+    # able to swap out img roots for roots of folders with mapped images
+    # mapped source --> swap out source_train and val of the source dataset
+    # mapped target --> swap out the val set of the target dataset / all the vals that are not the source dataset
+
+    mapped_source_path = config.get('mapped_source_path', None)
+    mapped_target_path = config.get('mapped_target_path', None)
+
+    if mapped_source_path and mapped_target_path:
+        raise ValueError('Cannot map both source and target.')
+    # get the machine name of the source dataset
+    source_device = set_spec_dict[desired_set_specs['source_train']].device
 
     # resolve the set names to set_specs
     resolved_set_specs = {}
@@ -180,14 +189,37 @@ def train_multi_input(config):
         elem = desired_set_specs[key]
         if not elem:
             continue
+        # multiple validation sets
         if isinstance(elem,list):
-            new_elem = []
+            new_elems = []
             for name in elem:
                 spec = set_spec_dict[name]
-                new_elem.append(spec)
+                new_elems.append(spec)
         else:
-            new_elem = [set_spec_dict[elem]]
-        resolved_set_specs[key] = new_elem
+            new_elems = [set_spec_dict[elem]]
+        # swap in the mapped source
+        if mapped_source_path and key == 'source_train':
+            new_elems[0].img_root_path = mapped_source_path
+        # swap in the mapped target
+        if mapped_target_path and key == 'target_train':
+            new_elems[0].img_root_path = mapped_target_path
+
+        # swap in the mapped target
+        if key == 'val':
+            mapped_elems = []
+            for set_spec in new_elems:
+                # if the target is to be mapped, replace all but the source val set
+                if mapped_target_path and (set_spec.device != source_device):
+                    set_spec.img_root_path = mapped_target_path
+                # if the source is to be mapped, replace only the source val set
+                if mapped_source_path and (set_spec.device == source_device):
+                    set_spec.img_root_path = mapped_source_path
+                mapped_elems.append(set_spec)
+            new_elems = new_elems
+
+        resolved_set_specs[key] = new_elems
+
+    print(resolved_set_specs)
 
     desired_set_specs = resolved_set_specs
 
@@ -211,9 +243,9 @@ def train_multi_input(config):
                                          legal_attribute_values=train_classes,
                                          muscles_to_use=muscles_to_use,
                                          dropna_values=dropna_values_set)
-
-            # patients = patients[0:40]
-            print(f'Loaded {len(patients)} elements.')
+            if tiny_subset:
+                patients = patients[0:10]
+            print(f'Loaded {len(patients)} patients.')
 
             img_path = set_spec.img_root_path
 
@@ -474,7 +506,7 @@ if __name__ == '__main__':
                   'backend': 'resnet-18', 'mil_pooling': 'mean', 'attention_mode': 'sigmoid',
                   'mil_mode': 'embedding', 'batch_size': 4, 'lr': 0.0269311, 'n_epochs': 5,
                   'use_pseudopatients': False, 'fc_hidden_layers': 2, 'fc_use_bn': True,
-                  'backend_cutoff': 1}
+                  'backend_cutoff': 1, 'att_loss_weights': {'Class': 1}}
 
     only_philips = {'source_train': 'Philips_iU22_train',
                          'val': 'Philips_iU22_val'}

@@ -2,7 +2,7 @@ import os
 
 from tqdm import tqdm
 
-from baselines import get_default_set_spec_dict, get_mnt_path
+from baselines import get_default_set_spec_dict
 from loading.loaders import get_data_for_spec, make_image_exporter
 
 if __name__ == '__main__':
@@ -18,7 +18,6 @@ if __name__ == '__main__':
         set_spec = set_spec_dict[set_spec_name]
         images = get_data_for_spec(set_spec, loader_type='image', attribute_to_filter='Image',
                                    muscles_to_use=None)
-        mnt_path = get_mnt_path()
         export_path = os.path.join('klaus', 'standard_format', target_name)
         os.makedirs(export_path,exist_ok=True)
         image_exporter = make_image_exporter(images, set_spec.img_root_path, use_one_channel=False, batch_size=8, device=set_spec.device,

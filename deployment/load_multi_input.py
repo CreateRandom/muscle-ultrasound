@@ -143,12 +143,11 @@ if __name__ == '__main__':
     # export the ground truth and the predictions
 
     os.makedirs('roc_analysis/preds', exist_ok=True)
-    # TODO automatically select name
-    method_name = 'tester'
+
     pd.DataFrame(y_true,columns=['true']).to_csv('roc_analysis/y_true.csv', index=False, header=True)
-    pred_path = os.path.join('roc_analysis','preds',(method_name + '.csv'))
+    pred_path = os.path.join('roc_analysis','preds',(experiment + '.csv'))
     pd.DataFrame(y_pred, columns=['pred']).to_csv(pred_path, index=False, header=True)
 
-    evaluate_roc(y_true, y_pred, method_name)
+    evaluate_roc(y_true, y_pred, experiment)
 
 

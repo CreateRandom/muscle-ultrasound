@@ -46,3 +46,7 @@ def pytorch_count_params(model):
   "count number trainable parameters in a pytorch model"
   total_params = sum(reduce( lambda a, b: a*b, x.size()) for x in model.parameters())
   return total_params
+
+def geometric_mean(input_x, dim):
+    log_x = torch.log(input_x)
+    return torch.exp(torch.mean(log_x, dim=dim))
