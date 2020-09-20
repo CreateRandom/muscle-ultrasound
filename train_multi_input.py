@@ -1,6 +1,6 @@
 import warnings
 
-from baselines import get_default_set_spec_dict
+from utils.experiment_utils import get_default_set_spec_dict
 from loading.datasets import problem_kind, make_att_specs, ConcatDataset
 from loading.loaders import make_bag_loader, get_data_for_spec, get_classes, make_bag_dataset, wrap_in_bag_loader, \
     make_basic_transform
@@ -92,6 +92,7 @@ def train_multi_input(config):
 
     n_epochs = config.get('n_epochs', 20)
     tiny_subset = config.get('use_subset', False)
+    local = config.get('local', False)
 
     in_channels = 1 if use_one_channel else 3
     config['in_channels'] = in_channels
@@ -103,6 +104,7 @@ def train_multi_input(config):
     # Multi-Head
     # loss weights for every attribute
     att_loss_weights = config.get('att_loss_weights', {})
+    use_gmean = config.get('use_gmean', False)
     # get all attributes
     additional_atts = list(att_loss_weights.keys())
     # remove the base attribute here, as it's not additional
@@ -125,7 +127,7 @@ def train_multi_input(config):
     offline_mode = False
     if current_host == 'pop-os':
         mnt_path = '/mnt/chansey/'
-        offline_mode = True
+       # offline_mode = True
     else:
         mnt_path = '/mnt/netcache/diag/'
 
@@ -169,7 +171,7 @@ def train_multi_input(config):
                          'val': val}
 
     # yields a mapping from names to set_specs
-    set_spec_dict = get_default_set_spec_dict(mnt_path)
+    set_spec_dict = get_default_set_spec_dict(mnt_path,local=local)
 
     # able to swap out img roots for roots of folders with mapped images
     # mapped source --> swap out source_train and val of the source dataset
@@ -372,7 +374,7 @@ def train_multi_input(config):
         trainer = create_da_trainer(model, optimizer, attribute_specs,
                                     att_loss_weights=att_loss_weights, lambda_weight=lambda_weight,
                                     layers_to_compute_da_on=layers_to_compute_da_on,
-                                    loss_kwargs_mapping= loss_kwargs_mapping,
+                                    loss_kwargs_mapping= loss_kwargs_mapping, use_gmean=use_gmean,
                                     device=device, output_transform=custom_output_transform,
                                     deterministic=True)
     else:
@@ -380,6 +382,7 @@ def train_multi_input(config):
         train_metrics = metrics
         trainer = create_bag_attention_trainer(model, optimizer, attribute_specs,
                                                att_loss_weights=att_loss_weights, loss_kwargs_mapping=loss_kwargs_mapping,
+                                               use_gmean=use_gmean,
                                                device=device, output_transform=custom_output_transform,
                                                deterministic=True)
 
@@ -459,23 +462,24 @@ def train_multi_input(config):
     pbar = ProgressBar()
     pbar.attach(trainer)
 
-    checkpoint_base_path = os.path.join(mnt_path, 'klaus/muscle-ultrasound/checkpoints')
+    base = mnt_path if not local else ''
+    checkpoint_base_path = os.path.join(base, 'klaus/muscle-ultrasound/checkpoints')
 
     # fallback to naming based on experiment config
     if 'checkpoint_dir' not in config:
         try:
             exp_id = npt_logger.get_experiment()._id
             checkpoint_dir = os.path.join(checkpoint_base_path, project_name, exp_id)
-            os.makedirs(checkpoint_dir, exist_ok=True)
         except:
             checkpoint_dir = checkpoint_base_path
     else:
         checkpoint_dir = config.get('checkpoint_dir')
 
     print(f'Using checkpoint: {checkpoint_dir}')
+    os.makedirs(checkpoint_dir, exist_ok=True)
 
     checkpointer = ModelCheckpoint(checkpoint_dir, 'pref', create_dir=True, require_empty=False, n_saved=None,
-                                   global_step_transform= global_step_from_engine(trainer))
+                                   global_step_transform= global_step_from_engine(trainer),atomic=True)
     trainer.add_event_handler(Events.EPOCH_COMPLETED(every=1), checkpointer,
                               {'model_state_dict': model, 'model_param_dict': StateDictWrapper(model_param_dict),
                                'transform_dict': StateDictWrapper(train_transform_params), 'config': StateDictWrapper(config)})
@@ -503,10 +507,11 @@ def train_multi_input(config):
 if __name__ == '__main__':
     # TODO read out from argparse
     bag_config = {'problem_type': 'bag', 'prediction_target': 'Class', 'backend_mode': 'finetune',
-                  'backend': 'resnet-18', 'mil_pooling': 'mean', 'attention_mode': 'sigmoid',
+                  'backend': 'resnet-18', 'mil_pooling': 'mean', 'attention_mode': 'softmax',
                   'mil_mode': 'embedding', 'batch_size': 4, 'lr': 0.0269311, 'n_epochs': 5,
                   'use_pseudopatients': False, 'fc_hidden_layers': 2, 'fc_use_bn': True,
-                  'backend_cutoff': 1, 'att_loss_weights': {'Class': 1}}
+                  'backend_cutoff': 1, 'att_loss_weights': {'Class': 1}, 'use_subset': True, 'local': True,
+                  'use_mask': True}
 
     only_philips = {'source_train': 'Philips_iU22_train',
                          'val': 'Philips_iU22_val'}
@@ -516,6 +521,6 @@ if __name__ == '__main__':
 
     da = {'source_train': 'ESAOTE_6100_train', 'target_train': 'Philips_iU22_train',
                          'val': ['ESAOTE_6100_val', 'Philips_iU22_val']}
-    config = {**bag_config, **da}
+    config = {**bag_config, **only_philips}
 
     train_multi_input(config)

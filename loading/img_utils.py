@@ -35,6 +35,8 @@ def create_mask(mat_file_path, im_shape):
     :return: A mask that represents the ROI, True if the pixel is inside the ROI
     """
     mat_file = loadmat(mat_file_path)
+    if 'mask_full' in mat_file:
+        return mat_file['mask_full'].astype('bool')
     if 'r' in mat_file:
         lines = mat_file['r']['roi'][0][0]
     elif 'roi' in mat_file:
@@ -100,7 +102,7 @@ class FixedHeightCrop(object):
         return self.__class__.__name__ + '(remove_top={0}, remove_bottom={1})'.format(self.remove_top, self.remove_bottom)
 
 class BrightnessBoost:
-    """Rotate by one of the given angles."""
+    """Increase the brightness."""
 
     def __init__(self, brightness_factor):
         self.brightness_factor = brightness_factor
@@ -108,26 +110,75 @@ class BrightnessBoost:
     def __call__(self, x):
         return TF.adjust_brightness(x, self.brightness_factor)
 
+class RegressionImageAdjustment:
+    def __init__(self, lr_model):
+        self.lr_model = lr_model
 
+    def __call__(self, x):
+        # transform into an np array
+        image = np.array(x)
+        original_size = image.shape
+
+        # adjust with brightness model
+        adjusted = self.lr_model.predict(image.flatten().reshape(-1,1))
+        adjusted = np.clip(adjusted, a_min=0, a_max=255)
+        # change datatype
+        adjusted = adjusted.round().astype('uint8')
+        adjusted = adjusted.reshape(*original_size)
+        image = Image.fromarray(adjusted)
+        return image
 
 loader_funcs = {'.png': load_pil_img, '.jpg': load_pil_img, '.dcm': load_dicom}
 
 
-def load_image(img, root_dir, use_one_channel, use_mask):
-    name = str(img)
-    img_name = os.path.join(root_dir, name)
-    raw_name, extension = os.path.splitext(img_name)
+def load_image(img, root_dir, use_one_channel, use_mask, original_image_location=None):
+    img_name = str(img)
+
+    raw_image_name, extension = os.path.splitext(img_name)
     loader_func = partial(loader_funcs[extension], use_one_channel=use_one_channel)
+    img_name = os.path.join(root_dir, img_name)
     image = loader_func(img_name)
+    # also optionally try loading the mask
     if use_mask:
-        # also optionally try loading the mask
+        if original_image_location:
+            raw_mask_name, extension = os.path.splitext(original_image_location)
+            # load up the original image
+            original_image = loader_func(original_image_location)
+            mask_size = original_image.size
+        else:
+            raw_mask_name = os.path.join(root_dir,raw_image_name)
+            mask_size = image.size
+        # standard format for all except GE
         try:
-            mat_file_path = raw_name + '.dcm.mat'
-            mask = create_mask(mat_file_path, image.size)
+
+            mask_path = raw_mask_name + '.dcm.mat'
+            mask = create_mask(mask_path, mask_size)
+            # if the mask is bigger than the image, scale it down
+            if mask_size != image.size:
+                # downscale
+                mask_image = Image.fromarray(mask.astype('uint8'))
+                mask_image = mask_image.resize(image.size)
+                mask = np.array(mask_image).astype('bool')
             image2 = np.array(image)
             mask = mask.transpose()
             image2[~mask] = 0
             image = Image.fromarray(image2)
+        # separate format for GE
         except:
-            print(f'Error loading mask for {name}')
+            try:
+                # try the alternative format next
+                mask_path = raw_mask_name + '.jpg.mat'
+                mask = create_mask(mask_path, image.size)
+                # if the mask is bigger than the image, scale it down
+                if mask_size != image.size:
+                #  downscale
+                    mask_image = Image.fromarray(mask.astype('uint8'))
+                    mask_image = mask_image.resize(image.size)
+                    mask = np.array(mask_image).astype('bool')
+                # do not need to transpose here
+                image2 = np.array(image)
+                image2[~mask.astype('bool')] = 0
+                image = Image.fromarray(image2)
+            except:
+                print(f'Error loading mask for {raw_image_name}')
     return image

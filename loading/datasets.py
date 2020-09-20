@@ -9,7 +9,6 @@ from torch.utils.data import Dataset
 from sklearn.preprocessing import label_binarize
 from random import randint
 import numpy as np
-from tqdm import tqdm
 
 from loading.img_utils import load_image
 from utils.utils import repeat_to_length
@@ -19,7 +18,7 @@ import torch
 class SingleImageDataset(Dataset):
     # for the use case where we want to classify single images
     def __init__(self, image_frame, root_dir, attribute_specs, return_attribute_dict=False, image_column='ImagePath', transform=None,
-                 use_one_channel=False, use_mask=False):
+                 use_one_channel=False, use_mask=False,strip_folder=False):
         """
         Args:
             image_frame (DataFrame): DataFrame containing image information
@@ -45,6 +44,8 @@ class SingleImageDataset(Dataset):
       #  self.label_encoder = label_encoder
         self.attribute_specs = attribute_specs
         self.return_attribute_dict = return_attribute_dict
+        if strip_folder:
+            self.image_frame[image_column] = self.image_frame[image_column].apply(lambda x: os.path.basename(x))
 
     def __len__(self):
         return len(self.image_frame)
@@ -118,13 +119,16 @@ class CustomLabelEncoder(object):
 def default_record_selection(patient):
     return patient.try_closest_fallback_to_latest()
 
+def select_record_for_device(patient, device):
+    return patient.select_for_device(device)
 
 class PatientBagDataset(Dataset):
     def __init__(self, patient_list, root_dir,
                  use_pseudopatients, attribute_specs, return_attribute_dict=False, muscles_to_use=None,
                  image_column='ImagePath', transform=None, use_one_channel=True,
                  use_mask=False, stack_images=True, n_images_per_channel=1,
-                 merge_left_right=False):
+                 merge_left_right=False, record_selection_policy=None, strip_folder=False,
+                 enforce_all_images_exist=True):
 
         # should return only one, but specified multiple --> error
         # should return multiple, but specified only one --> no error
@@ -135,7 +139,10 @@ class PatientBagDataset(Dataset):
         self.muscles_to_use = muscles_to_use
 
         # a policy for record selection
-        self.select_record_for_patient = default_record_selection
+        if not record_selection_policy:
+            self.select_record_for_patient = default_record_selection
+        else:
+            self.select_record_for_patient = record_selection_policy
         self.patients = patient_list
         print(f'Loaded {len(self.patients)} patients.')
         for patient in self.patients:
@@ -144,7 +151,7 @@ class PatientBagDataset(Dataset):
         # make pseudopatients for training purposes
         if use_pseudopatients:
             pp_list = []
-            for patient in tqdm(self.patients):
+            for patient in self.patients:
                 pps = patient.make_pseudopatients(muscles=self.muscles_to_use, method='each_once')
                 pp_list.extend(pps)
             self.patients = pp_list
@@ -170,6 +177,9 @@ class PatientBagDataset(Dataset):
             self.grouper = ['Muscle']
         else:
             self.grouper = ['Muscle', 'Side']
+
+        self.strip_folder = strip_folder
+        self.enforce_all_images_exist = enforce_all_images_exist
 
     # def get_all_labels(self):
     #     labels = [patient.attributes[self.attribute] for patient in self.patients]
@@ -206,7 +216,14 @@ class PatientBagDataset(Dataset):
 
         load_func = partial(load_image, root_dir=self.root_dir, use_one_channel=self.use_one_channel,
                             use_mask=self.use_mask)
+        if self.strip_folder:
+            image_frame[self.image_column] = image_frame[self.image_column].apply(lambda x: os.path.basename(x))
 
+        if not self.enforce_all_images_exist:
+            exists = image_frame[self.image_column].apply(lambda x: os.path.exists(os.path.join(self.root_dir, x)))
+            if not exists.all():
+                print(f'Missing images {image_frame[~exists][self.image_column]}')
+            image_frame = image_frame[exists]
         imgs = image_frame[self.image_column].apply(load_func).to_list()
         if self.transform:
             imgs = [self.transform(image) for image in imgs]
@@ -294,6 +311,16 @@ class Patient(object):
         if not could_select_closest:
             self.select_latest()
 
+    def select_for_device(self, device):
+
+        if len(self.records) > 1:
+            for i, record in enumerate(self.records):
+                device_rec = record.meta_info['DeviceInfo']
+                if device == device_rec:
+                    self.record_to_use = i
+                    return True
+        return False
+
     def make_pseudopatients(self, muscles=None, method='each_once', n_limit=100):
         record = self.records[self.record_to_use]
         pseudorecords = make_pseudorecords(record, muscles, method, n_limit)
@@ -314,6 +341,8 @@ class PatientRecord(object):
         self.meta_info = meta_info
 
     def get_EI_frame(self):
+        if 'EIs' not in self.meta_info:
+            return pandas.DataFrame()
         muscles = self.meta_info['Muscles_list']
         sides = self.meta_info['Sides']
         ei = self.meta_info['EIs']
@@ -385,12 +414,15 @@ class AttributeSpec:
 
 
 problem_kind = {'Sex': 'binary', 'Age': 'regression', 'BMI': 'regression',
-            'Class': 'binary', 'Muscle': 'passthrough', 'Side': 'passthrough'} #
+            'Class': 'binary', 'Muscle': 'passthrough', 'Side': 'passthrough',
+                'Age_binned': 'binary', 'BMI_binned': 'binary'} #
 
 problem_source = {'Sex': 'patient', 'Age': 'record', 'BMI': 'record',
-            'Class': 'patient', 'Muscle': 'image', 'Side' : 'image'} #
+            'Class': 'patient', 'Muscle': 'image', 'Side' : 'image',
+                  'Age_binned': 'record', 'BMI_binned': 'record'} #
 
-problem_legal_values = {'Class': ['no NMD', 'NMD'], 'Sex': ['F', 'M']}
+problem_legal_values = {'Class': ['no NMD', 'NMD'], 'Sex': ['F', 'M'],
+                        'Age_binned': ['below', 'above'], 'BMI_binned': ['below', 'above']}
 
 def make_att_specs():
     att_spec_dict = {}

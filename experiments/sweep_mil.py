@@ -17,7 +17,7 @@ def sweep_mil_attention(num_samples):
     for train_set_spec in train_set_specs:
         # run single head classification with no adjustments
 
-        base_config = {'prediction_target': 'Class', 'backend_mode': 'scratch',
+        base_config = {'prediction_target': 'Class', 'backend_mode': 'finetune',
                        'backend': 'resnet-18', 'n_epochs': 15, 'neptune_project': 'createrandom/mus-simplemil',
                        'problem_type': 'bag', 'batch_size': 8, 'mil_mode': 'embedding',
                        'use_pseudopatients': True, 'fc_use_bn': True, 'fc_hidden_layers': 2,

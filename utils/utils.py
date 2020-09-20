@@ -5,8 +5,9 @@ from functools import reduce
 import numpy as np
 import itertools
 
+from numpy import nanmedian, nanstd
+from scipy.stats import describe, scoreatpercentile
 import torch
-from tqdm import tqdm
 
 from itertools import chain, combinations
 
@@ -29,7 +30,7 @@ def flatten_list(elems):
 
 def compute_normalization_parameters(dataset, n_channels):
     full_loader = torch.utils.data.DataLoader(dataset, shuffle=False, num_workers=os.cpu_count())
-
+    from tqdm import tqdm
     mean = torch.zeros(1)
     std = torch.zeros(1)
     print('==> Computing mean and std..')
@@ -50,3 +51,33 @@ def pytorch_count_params(model):
 def geometric_mean(input_x, dim):
     log_x = torch.log(input_x)
     return torch.exp(torch.mean(log_x, dim=dim))
+
+def extract_simple_descriptive_features(vector, prefix=None):
+    result = describe(vector)
+    # get the fields out and transform them into dict entries
+    result_dict = dict((name, getattr(result, name)) for name in dir(result) if
+                       not name.startswith('_') and not name.startswith('__') and not callable(getattr(result, name)))
+    result_dict['min'] = result_dict['minmax'][0]
+    result_dict['max'] = result_dict['minmax'][1]
+    result_dict.pop('minmax')
+    if prefix:
+        new_dict = {}
+        for k, v in result_dict.items():
+            new_dict[prefix + '_' + k] = v
+        result_dict = new_dict
+    return result_dict
+
+def fivenum(vector):
+    """Returns Tukey's five number summary
+    (minimum, lower-hinge, median, upper-hinge, maximum) for the input vector,
+    a list or array of numbers based on 1.5 times the interquartile distance"""
+    try:
+        np.sum(vector)
+    except TypeError:
+        print('Error: you must provide a list or array of only numbers')
+    q1 = scoreatpercentile(vector[~np.isnan(vector)], 25)
+    q3 = scoreatpercentile(vector[~np.isnan(vector)], 75)
+    iqd = q3-q1
+    md = nanmedian(vector)
+    whisker = 1.5*iqd
+    return {'min': np.nanmin(vector), 'lower_hinge': md - whisker, 'median':md, 'upper_hinge': md + whisker, 'max': np.nanmax(vector)}

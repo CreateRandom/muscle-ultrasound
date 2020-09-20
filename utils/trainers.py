@@ -11,7 +11,8 @@ from utils.ignite_metrics import loss_mapping
 from utils.utils import geometric_mean
 
 
-def compute_classification_loss(head_preds, y, att_specs, loss_weights=None, loss_kwargs_mapping=None):
+def compute_classification_loss(head_preds, y, att_specs, loss_weights=None, loss_kwargs_mapping=None,
+                                use_gmean=False):
     if not loss_weights:
         loss_weights = {}
     loss_dict = {}
@@ -40,8 +41,10 @@ def compute_classification_loss(head_preds, y, att_specs, loss_weights=None, los
         weighted_losses = dict([(k, loss_weights[k] * v) if k in loss_weights else (k, v) for k, v in loss_dict.items()])
         # use the geometric mean of the losses
         loss_values = torch.stack(tuple(weighted_losses.values()))
-        loss = geometric_mean(loss_values,dim=0)
-
+        if use_gmean:
+            loss = geometric_mean(loss_values,dim=0)
+        else:
+            loss = torch.mean(loss_values,dim=0)
 
     return loss
 
@@ -67,6 +70,7 @@ def create_bag_attention_trainer(
     att_specs,
     att_loss_weights = None,
     loss_kwargs_mapping=None,
+    use_gmean=False,
     device: Optional[Union[str, torch.device]] = None,
     non_blocking: bool = False,
     prepare_batch: Callable = _prepare_batch,
@@ -123,7 +127,8 @@ def create_bag_attention_trainer(
         x, y = prepare_batch(batch, device=device, non_blocking=non_blocking)
         model_return_dict = model(x)
         head_preds = model_return_dict['head_preds']
-        loss = compute_classification_loss(head_preds, y, att_specs, att_loss_weights, loss_kwargs_mapping)
+        loss = compute_classification_loss(head_preds, y, att_specs, att_loss_weights, loss_kwargs_mapping,
+                                           use_gmean=use_gmean)
 
         if loss > 0:
             loss.backward()
@@ -262,6 +267,7 @@ def create_da_trainer(
     layers_to_compute_da_on,
     loss_kwargs_mapping = None,
     att_loss_weights = None,
+    use_gmean=False,
     device: Optional[Union[str, torch.device]] = None,
     non_blocking: bool = False,
     prepare_batch: Callable = _prepare_batch,
@@ -321,7 +327,8 @@ def create_da_trainer(
         x_tgt, _ = target
         model_out_src = model(x_src)
         head_preds = model_out_src['head_preds']
-        class_loss = compute_classification_loss(head_preds, y_src, att_specs, att_loss_weights,loss_kwargs_mapping)
+        class_loss = compute_classification_loss(head_preds, y_src, att_specs, att_loss_weights,loss_kwargs_mapping,
+                                                 use_gmean)
 
         # store the predictions
         pred_output['preds'] = model_out_src['head_preds']

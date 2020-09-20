@@ -13,8 +13,8 @@ from torchvision import transforms
 from torchvision.transforms import transforms, CenterCrop, Resize
 
 from loading.datasets import PatientBagDataset, SingleImageDataset, \
-    PatientRecord, Patient, AttributeSpec, ConcatDataset
-from loading.img_utils import FixedHeightCrop, BrightnessBoost
+    PatientRecord, Patient, AttributeSpec, ConcatDataset, problem_legal_values
+from loading.img_utils import FixedHeightCrop, BrightnessBoost, RegressionImageAdjustment
 
 
 def load_myositis_images(csv_path, muscles_to_use=None) -> pd.DataFrame:
@@ -27,7 +27,7 @@ def load_myositis_images(csv_path, muscles_to_use=None) -> pd.DataFrame:
                                    'T': 'Tibialis anterior','R': 'Rectus femoris', 'G': 'Gastrocnemius medial head',
                                     'FDP': 'Flexor digitorum profundus'}, inplace=True)
 
-    image_frame['Class'] = image_frame['Muscle'].replace({'N': 'No NMD', 'I': 'NMD', 'P': 'NMD',
+    image_frame['Class'] = image_frame['Diagnosis'].replace({'N': 'no NMD', 'I': 'NMD', 'P': 'NMD',
                                    'D': 'NMD'})
 
     if muscles_to_use:
@@ -55,7 +55,8 @@ resize_params_limited = {'ESAOTE_6100': {'center_crop': (480, 480), 'resize': (2
 
 # center crop esoate and myo to 480 * 503
 # center philips to the corresponding 561 * 588, then scale down
-def make_basic_transform(resize_option_name, normalizer_name=None, to_tensor=True, limit_image_size=False):
+def make_basic_transform(resize_option_name, normalizer_name=None, to_tensor=True, limit_image_size=False,
+                         brightness_factor=None, regression_model=None):
     t_list = []
     if resize_option_name:
         if limit_image_size:
@@ -74,6 +75,14 @@ def make_basic_transform(resize_option_name, normalizer_name=None, to_tensor=Tru
             img_size = resize_dict['resize']
             resize = Resize(img_size)
             t_list.append(resize)
+
+    # optionally add brightness transform
+    if brightness_factor:
+        t_list.append(BrightnessBoost(brightness_factor))
+
+    if regression_model:
+        t_list.append(RegressionImageAdjustment(regression_model))
+
     if to_tensor:
         # toTensor automatically scales between 0 and 1
         t_list.append(transforms.ToTensor())
@@ -142,6 +151,9 @@ def umc_to_patient_list(patient_path, record_path, image_path, attribute_to_filt
     patients = pd.read_pickle(patient_path)
 
     records = pd.read_pickle(record_path)
+    # add binned versions of the attributes
+    records['Age_binned'] = pd.cut(records['Age'],bins=[0, 51, 120], labels=['below', 'above'])
+    records['BMI_binned'] = pd.cut(records['BMI'], bins=[0, 24.4, 100], labels=['below', 'above'])
     images = pd.read_pickle(image_path)
     patients.set_index('pid', inplace=True)
     print(f'Read {len(patients)} patients, {len(records)} records and {len(images)} images.')
@@ -267,12 +279,13 @@ def get_n_cpu():
 
 
 def make_bag_dataset(patients: List[Patient], img_folder, use_one_channel, attribute_specs,
-                    transform,return_attribute_dict= False, use_pseudopatients=False, use_mask=False):
+                    transform,return_attribute_dict= False, use_pseudopatients=False, use_mask=False,
+                     strip_folder=False, enforce_all_images_exist=True):
     # TODO allow comparison of different methods for using pseudopatients
     ds = PatientBagDataset(patient_list=patients, root_dir=img_folder,
                            attribute_specs= attribute_specs, transform=transform, use_pseudopatients=use_pseudopatients,
                            muscles_to_use=None, use_one_channel=use_one_channel, return_attribute_dict=return_attribute_dict,
-                           use_mask=use_mask)
+                           use_mask=use_mask, strip_folder=strip_folder, enforce_all_images_exist=enforce_all_images_exist)
 
     print(f'Total number of images in dataset: {ds.get_total_number_of_images()}')
 
@@ -322,6 +335,8 @@ def make_image_exporter(image_frame: pd.DataFrame, img_folder, use_one_channel, 
     ds = SingleImageDataset(image_frame=image_frame,root_dir=img_folder,attribute_specs=[image_spec],transform=transform,
                             use_one_channel=use_one_channel)
 
+    print(len(ds))
+
     n_cpu = get_n_cpu()
 
     loader = DataLoader(ds, batch_size=batch_size, shuffle=True, num_workers=n_cpu, collate_fn=export_batch,
@@ -369,7 +384,8 @@ def image_frame_to_patients(frame) -> List[Patient]:
         info = info_by_patient.loc[pid].copy()
         # create a record from the image table
         image_frame = images_by_patient[pid]
-        pr = PatientRecord(r_id=pid + '_rec', image_frame=image_frame)
+        # for compatibility, store the patient info in the record as well
+        pr = PatientRecord(r_id=pid + '_rec', image_frame=image_frame, meta_info=info.to_dict())
         p = Patient(records=[pr], attributes=info.to_dict())
         return p
 
@@ -459,7 +475,8 @@ def get_data_for_spec(set_spec : SetSpec, loader_type='bag', attribute_to_filter
             elif loader_type == 'image':
                 all_elems.append(image_frame)
 
-            raise ValueError(f'Unknown loader type {loader_type}')
+            else:
+                raise ValueError(f'Unknown loader type {loader_type}')
 
         if loader_type == 'bag':
             return all_elems

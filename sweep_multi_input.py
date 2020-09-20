@@ -5,8 +5,12 @@ from experiments.sweep_multitask import sweep_multitask
 
 if __name__ == '__main__':
     # image aggregation baseline
-    sweep_baseline(num_samples=1)
+    # sweep_baseline(num_samples=24)
     # mil attention
-    sweep_mil_attention(num_samples=1)
-    sweep_multitask(num_samples=1)
-    sweep_coral(num_samples=1)
+    # sweep_mil_attention(num_samples=24)
+
+     sweep_coral(num_samples=12, layers_to_compute_da_on=[2], lambda_range=(1,10))
+    # sweep_coral(num_samples=12, layers_to_compute_da_on=[2], lambda_range=(1,10))
+
+   # sweep_multitask(num_samples=12, classification_task=False)
+   # sweep_multitask(num_samples=12, classification_task=True)

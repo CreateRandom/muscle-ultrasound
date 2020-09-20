@@ -1,4 +1,4 @@
-from baselines import get_default_set_spec_dict
+from utils.experiment_utils import get_default_set_spec_dict
 from training_utils import fix_seed
 from loading.datasets import problem_kind, make_att_specs
 from loading.loaders import make_bag_loader, \
@@ -113,7 +113,7 @@ def train_image_level(config):
         config.pop('neptune_project')
 
     # yields a mapping from names to set_specs
-    set_spec_dict = get_default_set_spec_dict(mnt_path)
+    set_spec_dict = get_default_set_spec_dict(mnt_path,local=True)
     # this is always needed
     source_train = config.get('source_train')
     target_train = config.get('target_train', None)
@@ -421,6 +421,9 @@ if __name__ == '__main__':
     esoate_train = {'source_train': 'ESAOTE_6100_train',
                          'val': ['ESAOTE_6100_val','Philips_iU22_val']}
 
-    config = {**config, **esoate_train}
+    only_philips = {'source_train': 'Philips_iU22_train',
+                         'val': 'Philips_iU22_val'}
+
+    config = {**config, **only_philips}
 
     train_image_level(config)

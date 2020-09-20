@@ -3,7 +3,7 @@ import os
 import itk
 import numpy
 
-from baselines import get_default_set_spec_dict
+from utils.experiment_utils import get_default_set_spec_dict
 from loading.loaders import get_data_for_spec, make_bag_dataset, make_basic_transform
 from loading.datasets import make_att_specs, PatientBagDataset
 from loading.datasets import  problem_legal_values

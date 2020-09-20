@@ -9,10 +9,15 @@ from experiments.experiment_defaults import esaote_train, philips_train
 from train_multi_input import train_multi_input
 from utils.utils import powerset
 
-def sample_loss_weight_dict(attributes_to_include, loss_weight_ranges):
-    combs = list(powerset(attributes_to_include))
-    # remove the empty set
-    combs.remove(())
+def sample_loss_weight_dict(loss_weight_ranges, sweep_powerset):
+
+    attributes_to_include = list(loss_weight_ranges.keys())
+    if sweep_powerset:
+        combs = list(powerset(attributes_to_include))
+        # remove the empty set
+        combs.remove(())
+    else:
+        combs = [attributes_to_include]
 
     comb = random.choice(combs)
     comb = list(comb)
@@ -28,28 +33,26 @@ def sample_loss_weight_dict(attributes_to_include, loss_weight_ranges):
         loss_weight_dict[elem] = weight
     return loss_weight_dict
 
-def sweep_multitask(num_samples):
+def sweep_multitask(num_samples, classification_task):
     # see here https://github.com/ray-project/ray/issues/7084
     ray.init(webui_host='127.0.0.1', object_store_memory=OBJECT_STORE_MINIMUM_MEMORY_BYTES)
-
-    attributes_to_include = ['Age', 'Sex', 'BMI']
-    # don't sample ranges, simply use the geometric mean of the losses instead
-    # sweep over the powerset here
-    loss_weight_ranges = {'Sex': 1, 'Age': 1, 'BMI': 1}
+    if not classification_task:
+        # use the original attributes here
+        loss_weight_ranges = {'Sex': 1, 'Age': (1, 100), 'BMI': (1, 100)}
+    else:
+        # use the binned attributes here
+        loss_weight_ranges = {'Sex': 1, 'Age_binned': 1, 'BMI_binned': 1}
 
     train_set_specs = [esaote_train, philips_train]
 
     for train_set_spec in train_set_specs:
         base_config = {'prediction_target': 'Class', 'backend_mode': 'finetune',
-                       'backend': 'resnet-18', 'n_epochs': 15, 'neptune_project': 'createrandom/mus-multitask'}
+                       'backend': 'resnet-18', 'n_epochs': 15, 'neptune_project': 'createrandom/mus-multitask',
+                       'problem_type': 'bag', 'batch_size': 8, 'mil_mode': 'embedding',
+                       'use_pseudopatients': True, 'fc_use_bn': True, 'fc_hidden_layers': 2,
+                       'backend_cutoff': 1, 'mil_pooling': 'attention', 'attention_mode': 'softmax', 'use_gmean': classification_task}
 
         base_config = {**base_config, **train_set_spec}
-        # TODO decide what to additionally sweep here (if anything)
-        bag_config = {'problem_type': 'bag', 'batch_size': 8, 'mil_mode': 'embedding',
-                           'use_pseudopatients': True, 'fc_use_bn': True, 'fc_hidden_layers': 2,
-                           'backend_cutoff': 1, 'mil_pooling': 'attention', 'attention_mode': 'sigmoid'}
-
-        bag_config = {**base_config, **bag_config}
 
         # run multi head classification, varying which classes are included
         bag_sweep_config = {
@@ -57,10 +60,10 @@ def sweep_multitask(num_samples):
             "lr": sample_from(lambda x: random.uniform(0.001, 0.1)),
             # effective extract_only should be possible by setting a very small lr
             "backend_lr": sample_from(lambda x: random.uniform(0.001, 0.1)),
-            "att_loss_weights": sample_from(lambda x: sample_loss_weight_dict(attributes_to_include,loss_weight_ranges))
+            "att_loss_weights": sample_from(lambda x: sample_loss_weight_dict(loss_weight_ranges, sweep_powerset=False))
         }
 
-        config = {**bag_config, **bag_sweep_config}
+        config = {**base_config, **bag_sweep_config}
 
         tune.run(train_multi_input,
                  config=config,
