@@ -1,6 +1,6 @@
 import warnings
 
-from utils.experiment_utils import get_default_set_spec_dict
+from utils.experiment_utils import get_default_set_spec_dict, get_mnt_path
 from loading.datasets import problem_kind, make_att_specs, ConcatDataset
 from loading.loaders import make_bag_loader, get_data_for_spec, get_classes, make_bag_dataset, wrap_in_bag_loader, \
     make_basic_transform
@@ -16,14 +16,13 @@ from ignite.engine import Events
 from ignite.contrib.handlers import ProgressBar
 from ignite.handlers import global_step_from_engine, ModelCheckpoint
 
-from training_utils import fix_seed
 # import logging
 from ignite.contrib.handlers.neptune_logger import NeptuneLogger, OutputHandler, WeightsScalarHandler, \
     GradsScalarHandler
 
 from utils.trainers import create_bag_attention_trainer, create_bag_attention_evaluator, create_da_trainer, \
     StateDictWrapper
-from utils.utils import pytorch_count_params
+from utils.utils import pytorch_count_params, fix_seed
 from utils.ignite_metrics import Variance, Average, Minimum, Maximum, obtain_metrics
 from utils.tokens import NEPTUNE_API_TOKEN
 
@@ -122,16 +121,8 @@ def train_multi_input(config):
     # CONFIG ASPECTS
     use_cuda = config.get('use_cuda', True) & torch.cuda.is_available()
 
-    # change logging and data location based on machine
-    current_host = socket.gethostname()
     offline_mode = False
-    if current_host == 'pop-os':
-        mnt_path = '/mnt/chansey/'
-       # offline_mode = True
-    else:
-        mnt_path = '/mnt/netcache/diag/'
 
-    print(f'Using mount_path: {mnt_path}')
 
     # whether a separate pass over the entire dataset should be done to log training set performance
     # as this incurs overhead, it can be turned off, then the results computed after each batch during the epoch
@@ -171,7 +162,7 @@ def train_multi_input(config):
                          'val': val}
 
     # yields a mapping from names to set_specs
-    set_spec_dict = get_default_set_spec_dict(mnt_path,local=local)
+    set_spec_dict = get_default_set_spec_dict()
 
     # able to swap out img roots for roots of folders with mapped images
     # mapped source --> swap out source_train and val of the source dataset
@@ -449,7 +440,6 @@ def train_multi_input(config):
                           event_name=Events.EPOCH_COMPLETED)
         val_evaluators.append(val_evaluator)
 
-    # todo migrate this to tensorboard
     if log_grads:
         npt_logger.attach(trainer,
                           log_handler=GradsScalarHandler(model),
@@ -462,7 +452,7 @@ def train_multi_input(config):
     pbar = ProgressBar()
     pbar.attach(trainer)
 
-    base = mnt_path if not local else ''
+    base = get_mnt_path() if not local else ''
     checkpoint_base_path = os.path.join(base, 'klaus/muscle-ultrasound/checkpoints')
 
     # fallback to naming based on experiment config
@@ -505,8 +495,8 @@ def train_multi_input(config):
     npt_logger.close()
 
 if __name__ == '__main__':
-    # TODO read out from argparse
-    bag_config = {'problem_type': 'bag', 'prediction_target': 'Class', 'backend_mode': 'finetune',
+
+    bag_config = {'prediction_target': 'Class', 'backend_mode': 'finetune',
                   'backend': 'resnet-18', 'mil_pooling': 'mean', 'attention_mode': 'softmax',
                   'mil_mode': 'embedding', 'batch_size': 4, 'lr': 0.0269311, 'n_epochs': 5,
                   'use_pseudopatients': False, 'fc_hidden_layers': 2, 'fc_use_bn': True,

@@ -1,23 +1,19 @@
 import os
 
-from deployment.conditions import trained_on_esaote
+from inference.conditions import trained_on_esaote
 from utils.experiment_utils import get_mnt_path
-from deployment.load_multi_input import load_checkpoint
+from inference.load_multi_input import load_checkpoint
 from train_image_level import train_image_level
 from train_multi_input import train_multi_input
 
 if __name__ == '__main__':
+
     mnt_path = get_mnt_path()
     checkpoint_folder = 'klaus/muscle-ultrasound/checkpoints/'
     neptune_user = 'createrandom'
-    base_path = os.path.join(mnt_path,'klaus/muscle-ultrasound/checkpoints/')
-
-   # project_name = 'createrandom/MUS-simplemil'
-   # experiment = 'MIL-28'
-    # epoch = 10
+    base_path = os.path.join(mnt_path,checkpoint_folder)
 
     check_prefix = 'pref_checkpoint'
-
 
     c = trained_on_esaote[0]
     file_name = check_prefix + '_' + str(c.epoch) + '.pt'

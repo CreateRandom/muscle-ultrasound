@@ -1,14 +1,16 @@
 torch==1.4.0
 torchvision==0.5.0
 pandas==1.0.5
-scikit-learn==0.22.2.post1
+scikit-learn>=0.22.2.post1
 pydicom==1.4.2
-numpy==1.19
+numpy>=1.19
 matplotlib==3.2.1
-scipy==1.4.1
-tqdm
-git+https://github.com/pytorch/ignite
+scipy>=1.4.1
+tqdm==4.46.0
+pytorch-ignite==0.4.0.post1
+# git+https://github.com/pytorch/ignite
 neptune-client
-psutil
-ray[tune]
-imgaug
+ray[tune]==0.8.6
+captum==0.2.0
+scikit-image==0.17.2
+pycaret==2.0

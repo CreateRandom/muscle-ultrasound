@@ -246,7 +246,6 @@ def collate_bags_to_batch_multi_atts(batch):
     return x, att_tensors
 
 
-# TODO move to some other place
 def collate_bags_to_batch(batch):
     x = [batch[e][0] for e in range(len(batch))]
     y = [torch.tensor(batch[e][1]) for e in range(len(batch))]
@@ -281,7 +280,7 @@ def get_n_cpu():
 def make_bag_dataset(patients: List[Patient], img_folder, use_one_channel, attribute_specs,
                     transform,return_attribute_dict= False, use_pseudopatients=False, use_mask=False,
                      strip_folder=False, enforce_all_images_exist=True):
-    # TODO allow comparison of different methods for using pseudopatients
+
     ds = PatientBagDataset(patient_list=patients, root_dir=img_folder,
                            attribute_specs= attribute_specs, transform=transform, use_pseudopatients=use_pseudopatients,
                            muscles_to_use=None, use_one_channel=use_one_channel, return_attribute_dict=return_attribute_dict,
@@ -307,7 +306,7 @@ def make_bag_loader(patients: List[Patient], img_folder, use_one_channel, normal
                     device, limit_image_size, return_attribute_dict= False,
                     use_pseudopatients=False, pin_memory=False):
     transform = make_basic_transform(device, normalizer_name=normalizer_name, limit_image_size=limit_image_size)
-    # TODO allow comparison of different methods for using pseudopatients
+
     ds = PatientBagDataset(patient_list=patients, root_dir=img_folder,
                            attribute_specs= attribute_specs, transform=transform, use_pseudopatients=use_pseudopatients,
                            muscles_to_use=None, use_one_channel=use_one_channel, return_attribute_dict=return_attribute_dict)

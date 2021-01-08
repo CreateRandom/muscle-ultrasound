@@ -8,7 +8,7 @@ from ray.ray_constants import OBJECT_STORE_MINIMUM_MEMORY_BYTES
 from experiments.experiment_defaults import p_to_e, e_to_p
 from train_multi_input import train_multi_input
 
-def sweep_coral(num_samples, layers_to_compute_da_on):
+def sweep_coral(num_samples, lambda_range, layers_to_compute_da_on):
     # see here https://github.com/ray-project/ray/issues/7084
     ray.init(webui_host='127.0.0.1', object_store_memory=OBJECT_STORE_MINIMUM_MEMORY_BYTES)
 

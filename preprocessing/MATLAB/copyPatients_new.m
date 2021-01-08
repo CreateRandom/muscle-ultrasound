@@ -1,31 +1,44 @@
 clear; clc
 cd('\\umcczzoknf01\Data_knf\research_data_echo\auto_lines')
+% the folder that will house the converted output
 out_path = '\\umcczzoknf01\Data_knf\research_data_echo\auto_lines\total_patients';
-
+% the currently used directory for saving patient records
 current.path = '\\umcczzoknf01\Data_knf\Qumia_data';
+% an archive with older patient records mostly from the Philips device
 archive.path = '\\umcczzoknf01\Data_knf\Workroom\Archive';
+% a folder with controls used for calibration
 controls.path = 'H:\KNF\Research\Studies\Proefpersonen spierecho 2013-2014\Data metingen spierecho Esaote';
 
 %lp_path = 'labeled patients_deduped.mat';
+% a table with patient ids and diagnosis
+% in the current setup, this just contains patients
+% from the original label study (500), cramp and controls
 lp_path = 'labeledPatients_cramp_controls.xlsx';
+
+% also include patients that do not have a label yet
+% as additional labels will be added later
+% in the current setup, the labels provided by the medical student are added later
+include_unlabeled = true;
+% regular expressions for file name parsing differ by source
 
 % patient folder regex: 7-digit ID, year, date, month, hour, minute
 current.reg = '(\d{7})_(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})';
 % archive regex 7-digit ID, year, date, month, hour, minute
 archive.reg = '(\d{7})\.(\d{4})(\d{2})(\d{2})\.(\d{2})(\d{2})';
-
 % the control patients don't conform to any scheme
 controls.reg = '(.*)';
+
+% policy for enforcing the presence of an xml file differs by source as well
 % they often don't have an xml file, so we don't enforce it,
 % fall back to the analysis file
 controls.no_xml_enforced = true;
-
 current.no_xml_enforced = false;
 archive.no_xml_enforced = false;
 
 locations = [current; archive; controls];
 %locations = [controls];
 
+% flags for omitting steps to speed up the process as needed
 analyze_images = true;
 copy_images = true;
 % what format to export to
@@ -35,16 +48,15 @@ export_format = ".png";
 % number of core muscles, if false, use all records
 pick_one_record_per_patient = false;
 
-% optionally, also include patients that do not have a label yet
-include_unlabeled = true;
-
 labeledpatients = readtable(lp_path);
 %load(lp_path,'labeledpatients');
 disp('Found a total of ' + string(size(labeledpatients,1)) + ' labeled patients.');
-
+% now, go over all available records, unless available records have been cached
+% make sure to delete this file to avoid use of cached records
+% e.g. if new patient folders have become available
 has_cache = exist('available_records.mat','file');
 if ~has_cache
-    disp('Parsing records from disk.');
+    disp('Parsing available records from disk.');
     available_recs = {};
     record_count = 1;
 
@@ -128,7 +140,7 @@ labeled_dups = intersect(duplicates,labeledpatients.pid);
 disp(string(size(labeled_dups,1)) + ' of those patients are labeled currently.');
 a=1;
 
-% find the ids we need
+% find the ids we have available
 available_recs = cell2table(available_recs,'VariableNames',{'pid', 'folder_name', 'date'});
 available_recs.pid = string(available_recs.pid);
 
@@ -169,7 +181,10 @@ patient_fields1_66 = {'pid', 'Birthdate', 'Height', 'Weight', 'Sex', 'Age','Reco
 
 rec_counter = 1;
 rec_versions = [];
-start_patient = 4001;
+% use this to be able to perform the process in smaller batches
+% to avoid data loss when it's interrupted
+% e.g. by setting start to 1 and end to 200 and so forth in batches
+start_patient = 1;
 end_patient = size(unique_patients_to_copy,1);
 for patient = start_patient:end_patient
     display([num2str(patient) '/' num2str(size(unique_patients_to_copy,1))]);

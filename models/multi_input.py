@@ -112,7 +112,8 @@ def make_resnet_backend(use_embedding, cutoff, backend_kwargs):
         backend = make_resnet_18(num_classes=1, **backend_kwargs)
         out_dim = 1
     return backend, out_dim
-# todo add cutoff
+
+
 def make_alex_backend(use_embedding, cutoff, backend_kwargs):
     out_dim = 1
     backend = make_alexnet(num_classes=1, **backend_kwargs)

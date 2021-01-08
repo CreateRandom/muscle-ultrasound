@@ -14,7 +14,7 @@ def sweep_cycada(num_samples):
 
     train_set_specs = [esaote_train, philips_train]
 
-    # todo fill in paths
+    # NB: fill in paths of the mapped images
     mapped_paths = {'mapped_source_path': 'some_path', 'mapped_target_path': 'some_other_path'}
     # iterate over mapping the source or the target
     for to_map, mapped_path in mapped_paths.items():

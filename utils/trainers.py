@@ -279,7 +279,6 @@ def create_da_trainer(
     Args:
         model (`torch.nn.Module`): the model to train.
         optimizer (`torch.optim.Optimizer`): the optimizer to use.
-        loss_fn (torch.nn loss function): the loss function to use.
         device (str, optional): device type specification (default: None).
             Applies to batches after starting the engine. Model *will not* be moved.
             Device can be CPU, GPU or TPU.

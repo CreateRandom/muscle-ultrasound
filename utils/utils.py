@@ -1,5 +1,6 @@
 import operator
 import os
+import random
 from functools import reduce
 
 import numpy as np
@@ -81,3 +82,9 @@ def fivenum(vector):
     md = nanmedian(vector)
     whisker = 1.5*iqd
     return {'min': np.nanmin(vector), 'lower_hinge': md - whisker, 'median':md, 'upper_hinge': md + whisker, 'max': np.nanmax(vector)}
+
+
+def fix_seed(seed):
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    random.seed(seed)

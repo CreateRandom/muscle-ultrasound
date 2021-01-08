@@ -5,9 +5,10 @@ from tqdm import tqdm
 from utils.experiment_utils import get_default_set_spec_dict
 from loading.loaders import get_data_for_spec, make_image_exporter
 
+# A helper for exporting all images to a path, used only as a preprocessing step for the CycleGAN training
 if __name__ == '__main__':
 
-    set_spec_dict = get_default_set_spec_dict(local=True)
+    set_spec_dict = get_default_set_spec_dict()
 
     specs = [('Philips_iU22_val', 'testB'), ('ESAOTE_6100_train', 'trainA'), ('Philips_iU22_train', 'trainB'), ('ESAOTE_6100_val', 'testA'),
              ('ESAOTE_6100_test', 'ESAOTE_6100_test'), ('Philips_iU22_test','Philips_iU22_test')]
