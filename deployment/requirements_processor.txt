@@ -1,7 +1,7 @@
 itk==5.1.0.post3
 captum==0.2.0
 #torch==1.4.0
-pillow==7.1.2
+pillow==8.1.1
 pandas==1.0.5
 scikit-learn==0.23.2
 pydicom==1.4.2
