@@ -46,9 +46,9 @@ containing the images that was produced by the MATLAB script, these tables can b
 
 ## JHU data preprocessing
 Additional data was released by Johns Hopkins University [here](https://github.com/jalbayd1/myopathy_US).
-We include a notebook that automatically downloads the images and processes them to be used for this project.
+We include [a notebook](notebooks/Myositis_preprocessing.ipynb) that automatically downloads the images and processes them to be used for this project.
 However, a manual step is necessary, as the xlsx file provided by the authors is incorrect and there is no
-way to directly import the mat file. Use MATLAB to save the table in the mat file in csv format.
+way to directly import the mat file. Use MATLAB to save the table in the mat file in csv format and then use it as an input for the notebook.
 
 **Products**
 * C: A csv file containing patient information and the association with the images.
