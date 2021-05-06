@@ -124,7 +124,7 @@ py3nvml==0.2.6
 pycaret==2.0
 pycparser==2.20
 pydicom==1.4.2
-Pygments==2.7.3
+Pygments==2.7.4
 PyJWT==1.7.1
 pyLDAvis==2.1.2
 pyod==0.8.5
