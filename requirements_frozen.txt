@@ -136,7 +136,7 @@ python-editor==1.0.4
 pytorch-ignite==0.4.0.post1
 pytz==2020.5
 PyWavelets==1.1.1
-PyYAML==5.3.1
+PyYAML==5.4
 pyzmq==20.0.0
 querystring-parser==1.2.4
 ray==0.8.6
